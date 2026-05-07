@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -50,7 +51,11 @@ func newAuditLog(path string) (*auditLog, error) {
 			return nil, fmt.Errorf("audit log: mkdir parent: %w", err)
 		}
 	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	// O_NOFOLLOW guards against a symlink-attack: if EMBER_PLUGIN_CROWDSEC_AUDIT_LOG
+	// points at a symlink (e.g. dangling at /etc/passwd), open fails with ELOOP
+	// instead of writing audit content through the link. Plugin then surfaces
+	// the open error via the renderer status line and keeps running.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("audit log: open %s: %w", path, err)
 	}
