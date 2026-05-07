@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -97,8 +96,12 @@ func (a *authClient) loginLocked(ctx context.Context) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("login status %d: %s", resp.StatusCode, string(raw))
+		// Body is intentionally NOT included: a hostile or misrouted LAPI
+		// (e.g. EMBER_PLUGIN_CROWDSEC_LAPI_URL pointed at the wrong host)
+		// could echo the request payload — including the machine password —
+		// back into the response, which would then leak via err.Error()
+		// into the renderer status line and the audit log.
+		return fmt.Errorf("login: status %d", resp.StatusCode)
 	}
 
 	var lr loginResponse
