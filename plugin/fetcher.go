@@ -10,18 +10,32 @@ import (
 	"net/url"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// defaultDecisionOrigins is the server-side filter applied to /v1/decisions
+// by default. CrowdSec LAPI returns ALL origins otherwise (local engine +
+// CAPI Threat Intel feed + community blocklists), which on a busy node hits
+// 50k+ rows and drowns the operator-relevant local + cscli-manual entries.
+// Iteration 3: filter to the two origins the operator actually controls.
+const defaultDecisionOrigins = "crowdsec,cscli"
 
 // fetcher pulls decisions + alerts from LAPI in parallel. Decisions go via
 // the bouncer X-Api-Key (LAPI restricts /v1/decisions to bouncer auth);
 // alerts go via the machine-account JWT from authClient.
+//
+// Iteration 3: includeCAPI is a thread-safe toggle the renderer flips with
+// hotkey `c`. When false (default), GET /v1/decisions carries
+// `?origins=crowdsec,cscli`; when true, no origins filter is sent and ALL
+// decisions (incl. CAPI + lists) come back.
 type fetcher struct {
 	auth        *authClient
 	base        string
 	bouncerKey  string
 	alertsSince time.Duration
 	httpClient  *http.Client
+	includeCAPI atomic.Bool
 }
 
 func newFetcher(auth *authClient, base, bouncerKey string, alertsSince time.Duration) *fetcher {
@@ -39,6 +53,20 @@ func newFetcher(auth *authClient, base, bouncerKey string, alertsSince time.Dura
 			Transport: auth.httpClient.Transport,
 		},
 	}
+}
+
+// IncludeCAPI returns the current toggle state. Renderer reads this to pick
+// the header text and to know whether `d` should be blocked on the selected
+// row's origin.
+func (f *fetcher) IncludeCAPI() bool {
+	return f.includeCAPI.Load()
+}
+
+// SetIncludeCAPI flips the toggle; the next Fetch call observes the new
+// value. No re-fetch is forced — Ember's tick scheduler triggers within
+// fetch_interval (default 10s).
+func (f *fetcher) SetIncludeCAPI(v bool) {
+	f.includeCAPI.Store(v)
 }
 
 // fetchAll runs decisions + alerts in parallel. Returns a snapshot with
@@ -94,7 +122,15 @@ func (f *fetcher) fetchDecisions(ctx context.Context) ([]Decision, error) {
 	// — JWT yields 401. No retry on 401 here: the bouncer key is static and
 	// not refreshable from inside the plugin; surface the error so the user
 	// can fix the env-var.
-	body, err := f.bouncerGet(ctx, "/v1/decisions")
+	//
+	// Server-side origin filter: by default we restrict to the local engine
+	// and manual cscli decisions. Toggle via hotkey `c` (renderer) flips
+	// includeCAPI=true and the next call drops the filter entirely.
+	path := "/v1/decisions"
+	if !f.includeCAPI.Load() {
+		path += "?origins=" + url.QueryEscape(defaultDecisionOrigins)
+	}
+	body, err := f.bouncerGet(ctx, path)
 	if err != nil {
 		return nil, err
 	}
