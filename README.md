@@ -203,6 +203,10 @@ The module path is `github.com/rewulff/ember-crowdsec`. `go install github.com/r
 
 These will land in a follow-up release sprint once the plugin API stabilizes upstream.
 
+## Background
+
+Long-form write-up on the design decisions (CrowdSec's strict bouncer-key/JWT split, the CAPI-versus-local-decisions filter, why the kill-switch on CAPI unbans): [Ember + CrowdSec — Ein TUI-Plugin gegen die 50.000-Decisions-Wand](https://wulffit.de/artikel/ember-crowdsec) (German, 2026-05-08).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
