@@ -21,6 +21,12 @@ import (
 // Iteration 3: filter to the two origins the operator actually controls.
 const defaultDecisionOrigins = "crowdsec,cscli"
 
+// maxLapiBodySize caps the response body of every LAPI call. Worst-case
+// observed payload on rwu's setup with CAPI toggle enabled is ~5 MB (50k+
+// decisions); 16 MiB leaves headroom while preventing a hostile or buggy
+// LAPI from triggering OOM via an unbounded io.ReadAll.
+const maxLapiBodySize = 16 << 20
+
 // fetcher pulls decisions + alerts from LAPI in parallel. Decisions go via
 // the bouncer X-Api-Key (LAPI restricts /v1/decisions to bouncer auth);
 // alerts go via the machine-account JWT from authClient.
@@ -193,7 +199,7 @@ func (f *fetcher) bouncerGet(ctx context.Context, path string) ([]byte, error) {
 		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, string(raw))
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxLapiBodySize))
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
 	}
@@ -232,7 +238,7 @@ func (f *fetcher) authedGet(ctx context.Context, path string, _ url.Values) ([]b
 			return nil, fmt.Errorf("status %d: %s", resp.StatusCode, string(raw))
 		}
 
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxLapiBodySize))
 		resp.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("read body: %w", err)
