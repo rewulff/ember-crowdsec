@@ -75,14 +75,46 @@ The CrowdSec tab is interactive:
 | Key | Mode | Effect |
 |---|---|---|
 | `↑/↓` (or `j/k`) | normal | Move the decision cursor |
-| `d` | normal | Confirm-unban prompt for the selected decision |
-| `w` | normal | Whitelist input flow (duration default `24h`) |
+| `c` | normal | Toggle CAPI inclusion (see "Origin filter" below) |
+| `d` | normal | Confirm-unban prompt — **only on `crowdsec` / `cscli` decisions** |
+| `w` | normal | Whitelist input flow (duration default `24h`); allowed on all origins |
 | `y / Y` | confirm-unban / confirm-whitelist | Run the action |
 | `n / N / Esc` | any confirm | Cancel |
 | `Enter` | input-duration | Advance to confirm-whitelist |
 | printable + `Backspace` | input-duration | Edit the duration buffer |
 
 Every confirm dialog shows the IP, origin and scenario inline so accidental hits are unlikely. While in any non-normal mode the plugin **consumes every keystroke** so that other tabs/global shortcuts don't fire mid-flow.
+
+### Origin filter (default = your decisions only)
+
+CrowdSec LAPI's `GET /v1/decisions` returns **all** active bans by default — local engine + CAPI Threat Intel feed + community blocklists (firehol, tor, ...). On a busy node this can be 50.000+ rows, which buries the operator-relevant decisions you actually want to see.
+
+The plugin filters server-side by default with `?origins=crowdsec,cscli`, i.e. only:
+
+- **`crowdsec`** — bans your own engine produced from log scenarios
+- **`cscli`** — manual `cscli decisions add` entries
+
+Press **`c`** to toggle the filter off — the next fetch then returns the full feed. The header line shows the current state:
+
+```
+CrowdSec — 12 decisions, 4 alerts (last fetch 14:23:45, filter: local+manual, c: include CAPI)
+```
+
+after pressing `c`:
+
+```
+CrowdSec — 50217 decisions, 4 alerts (last fetch 14:23:55, filter: ALL, c: hide CAPI)
+```
+
+### Why `d` is blocked on CAPI / list decisions
+
+CAPI and community-list rows live in CrowdSec's central feed. `DELETE /v1/decisions/{id}` succeeds locally on those, but the next CAPI sync re-pulls the same row — the unban is effectively a no-op and the operator sees the ban "come back". The plugin therefore blocks `d` on any non-`crowdsec`/`cscli` origin and shows:
+
+```
+Cannot unban CAPI decision (will re-pull). Use w (whitelist) instead.
+```
+
+`w` (whitelist) **is** the right action here — a `type=whitelist` decision beats any ban regardless of origin, including CAPI rows. Whitelist remains allowed on every selected decision.
 
 The whitelist body mirrors what `cscli decisions add --type whitelist` sends: a `POST /v1/alerts` with one alert containing one decision (`type=whitelist`, `origin=ember-tui`). Verified against `crowdsec/cmd/crowdsec-cli/clidecision/decisions.go` `cli.add()` lines 256-388 (master @ 2026-05-07).
 
