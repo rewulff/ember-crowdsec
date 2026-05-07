@@ -15,6 +15,10 @@ MVP. Pinned to `ember v1.3.0` because the plugin API is marked EXPERIMENTAL upst
 - Fetch: tick-based polling. Decisions and alerts run in parallel goroutines on each tick.
 - Render: Bubble Tea / lipgloss. Decisions sorted by remaining TTL desc, alerts by created_at desc, header + per-section badges, status-count badge in the tab-bar.
 
+## Pre-requisite
+
+You need a working Caddy + CrowdSec stack on the host the plugin will run on. If you already have that running, skip ahead. If you don't: a complete setup guide (custom xcaddy build, CrowdSec install, bouncer wiring, hardening, common pitfalls) lives in [`docs/CADDY-CROWDSEC-SETUP.md`](docs/CADDY-CROWDSEC-SETUP.md). Setup time end-to-end is ~2-4 hours.
+
 ## Setup
 
 > **Security caveat — read first.** This plugin sends `MACHINE_PASSWORD` and `BOUNCER_KEY` over plaintext HTTP whenever the configured LAPI URL starts with `http://`. It is therefore designed for **localhost-only** LAPI access (`http://127.0.0.1:8080`). Never combine `EMBER_PLUGIN_CROWDSEC_LAPI_URL=http://<remote-host>` with `EMBER_PLUGIN_CROWDSEC_INSECURE_TLS=true` — that combination, or a plaintext HTTP URL pointing off-host, leaks both credentials over the wire on every fetch and every login refresh. If you really need a remote LAPI, terminate it through a TLS-aware tunnel (Wireguard, NetBird, SSH local-forward) so the plugin still talks `http://127.0.0.1:<port>` but the bytes leave the box encrypted.
