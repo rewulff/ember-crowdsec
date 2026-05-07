@@ -288,6 +288,17 @@ func (r *renderer) includeCAPI() bool {
 	return r.fetch.IncludeCAPI()
 }
 
+// originLocal reports whether a decision can be unbanned from this LAPI.
+// CrowdSec's CAPI / community-list pipeline is read-only by design —
+// DELETE on those returns 200 but the next CAPI sync re-pulls the same
+// row, effective no-op. The rule mirrors the server-side filter set:
+// only origin in {crowdsec, cscli} is operator-controlled and genuinely
+// unbannable. CAPI, lists:firehol, lists:tor, ... must be whitelisted
+// instead (whitelist beats ban regardless of origin).
+func originLocal(origin string) bool {
+	return origin == "crowdsec" || origin == "cscli"
+}
+
 // handleKey is the keyboard state machine. Returns true if Ember should
 // suppress the key (i.e. don't let it bubble up to global tab-bar
 // shortcuts). All confirm/input modes return true for every key to enforce
@@ -337,12 +348,26 @@ func (r *renderer) handleNormal(msg tea.KeyMsg) bool {
 		}
 		return true
 	case "d":
-		if d := r.currentDecision(); d != nil {
-			r.pendingDecision = d
-			r.mode = modeConfirmUnban
-		} else {
+		d := r.currentDecision()
+		if d == nil {
 			r.setStatus("no decision selected")
+			return true
 		}
+		// Block unban on non-local origins. CAPI / community lists are
+		// pulled from the central feed — DELETE locally is meaningless
+		// because the next CAPI sync re-pulls the row. Whitelist (which
+		// has type=whitelist and beats any ban regardless of origin) is
+		// the correct override; suggest it via the status line and stay
+		// in normal mode (no confirm dialog).
+		if !originLocal(d.Origin) {
+			r.setStatus(fmt.Sprintf(
+				"Cannot unban %s decision (will re-pull). Use w (whitelist) instead.",
+				d.Origin,
+			))
+			return true
+		}
+		r.pendingDecision = d
+		r.mode = modeConfirmUnban
 		return true
 	case "w":
 		if d := r.currentDecision(); d != nil {
