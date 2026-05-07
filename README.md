@@ -17,6 +17,8 @@ MVP. Pinned to `ember v1.3.0` because the plugin API is marked EXPERIMENTAL upst
 
 ## Setup
 
+> **Security caveat — read first.** This plugin sends `MACHINE_PASSWORD` and `BOUNCER_KEY` over plaintext HTTP whenever the configured LAPI URL starts with `http://`. It is therefore designed for **localhost-only** LAPI access (`http://127.0.0.1:8080`). Never combine `EMBER_PLUGIN_CROWDSEC_LAPI_URL=http://<remote-host>` with `EMBER_PLUGIN_CROWDSEC_INSECURE_TLS=true` — that combination, or a plaintext HTTP URL pointing off-host, leaks both credentials over the wire on every fetch and every login refresh. If you really need a remote LAPI, terminate it through a TLS-aware tunnel (Wireguard, NetBird, SSH local-forward) so the plugin still talks `http://127.0.0.1:<port>` but the bytes leave the box encrypted.
+
 ### 1. Provision two credentials on the LAPI host
 
 ```sh
