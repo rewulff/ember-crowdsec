@@ -13,20 +13,22 @@ import (
 	"time"
 )
 
-// fetcher pulls decisions + alerts from LAPI in parallel using the JWT from
-// authClient. It is shared by the Fetcher interface implementation on
-// CrowdSecPlugin.
+// fetcher pulls decisions + alerts from LAPI in parallel. Decisions go via
+// the bouncer X-Api-Key (LAPI restricts /v1/decisions to bouncer auth);
+// alerts go via the machine-account JWT from authClient.
 type fetcher struct {
 	auth        *authClient
 	base        string
+	bouncerKey  string
 	alertsSince time.Duration
 	httpClient  *http.Client
 }
 
-func newFetcher(auth *authClient, base string, alertsSince time.Duration) *fetcher {
+func newFetcher(auth *authClient, base, bouncerKey string, alertsSince time.Duration) *fetcher {
 	return &fetcher{
 		auth:        auth,
 		base:        base,
+		bouncerKey:  bouncerKey,
 		alertsSince: alertsSince,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
@@ -88,8 +90,11 @@ func (f *fetcher) fetchAll(ctx context.Context) snapshot {
 }
 
 func (f *fetcher) fetchDecisions(ctx context.Context) ([]Decision, error) {
-	// LAPI default returns active decisions only.
-	body, err := f.authedGet(ctx, "/v1/decisions", nil)
+	// LAPI default returns active decisions only. Auth is X-Api-Key (bouncer)
+	// — JWT yields 401. No retry on 401 here: the bouncer key is static and
+	// not refreshable from inside the plugin; surface the error so the user
+	// can fix the env-var.
+	body, err := f.bouncerGet(ctx, "/v1/decisions")
 	if err != nil {
 		return nil, err
 	}
@@ -125,6 +130,38 @@ func (f *fetcher) fetchAlerts(ctx context.Context) ([]Alert, error) {
 		return nil, fmt.Errorf("decode alerts: %w", err)
 	}
 	return out, nil
+}
+
+// bouncerGet performs a GET with the bouncer X-Api-Key header. The bouncer
+// credential is static so no refresh path; a 401 is reported as-is.
+func (f *fetcher) bouncerGet(ctx context.Context, path string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.base+path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("X-Api-Key", f.bouncerKey)
+	req.Header.Set("User-Agent", "ember-crowdsec/0.1")
+
+	resp, err := f.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("http: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("bouncer key invalid (status %d): %s", resp.StatusCode, string(raw))
+	}
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, string(raw))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
+	}
+	return body, nil
 }
 
 // authedGet performs a JWT-authenticated GET. On 401/403 it invalidates the
