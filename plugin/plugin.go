@@ -162,10 +162,6 @@ func parseOptions(opts map[string]string) (pluginCfg, error) {
 	}
 	cfg.password = opts["machine_password"]
 	if cfg.password == "" {
-		// Accept legacy key for convenience.
-		cfg.password = opts["password"]
-	}
-	if cfg.password == "" {
 		return cfg, errors.New("EMBER_PLUGIN_CROWDSEC_MACHINE_PASSWORD is required")
 	}
 
