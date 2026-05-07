@@ -73,7 +73,7 @@ func (p *CrowdSecPlugin) Provision(_ context.Context, cfg emberplugin.PluginConf
 		p.audit = audit
 	}
 
-	p.render = newRenderer(p.actions, p.audit)
+	p.render = newRenderer(p.actions, p.audit, p.fetch)
 	return nil
 }
 
@@ -92,9 +92,10 @@ func (p *CrowdSecPlugin) Fetch(ctx context.Context) (any, error) {
 func (p *CrowdSecPlugin) Update(data any, width, height int) emberplugin.Renderer {
 	if p.render == nil {
 		// Defensive: Ember may call Update before Provision in some startup
-		// paths. Lazy-init with nil action/audit deps — write actions are
-		// disabled until Provision wires them up.
-		p.render = newRenderer(nil, nil)
+		// paths. Lazy-init with nil action/audit/fetch deps — write
+		// actions and the CAPI toggle are disabled until Provision wires
+		// them up.
+		p.render = newRenderer(nil, nil, nil)
 	}
 	p.render.update(data, width, height)
 	return p
@@ -131,12 +132,16 @@ func (p *CrowdSecPlugin) StatusCount() string {
 	return strconv.Itoa(n)
 }
 
-// HelpBindings returns per-tab footer shortcuts. Iteration 2 adds the unban
-// (d) and whitelist (w) hotkeys for the killer feature.
+// HelpBindings returns per-tab footer shortcuts. Iteration 2 added unban
+// (d) + whitelist (w); Iteration 3 adds the CAPI inclusion toggle (c) so
+// the operator can flip between "decisions on MY caddy" (default,
+// origins=crowdsec,cscli) and the full feed view including CAPI Threat
+// Intel + community blocklists.
 func (p *CrowdSecPlugin) HelpBindings() []emberplugin.HelpBinding {
 	return []emberplugin.HelpBinding{
 		{Key: "↑/↓", Desc: "select decision"},
-		{Key: "d", Desc: "unban"},
+		{Key: "c", Desc: "toggle CAPI"},
+		{Key: "d", Desc: "unban (local+cscli only)"},
 		{Key: "w", Desc: "whitelist"},
 	}
 }

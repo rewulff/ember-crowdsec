@@ -37,6 +37,12 @@ type renderer struct {
 	snap    snapshot
 	hasData bool
 
+	// fetcher is the source for the includeCAPI toggle state. Renderer
+	// reads it for header text and for the 'd' (unban) origin guard, and
+	// flips it on hotkey 'c'. May be nil in unit tests that bypass
+	// Provision; both reads and writes guard against nil.
+	fetch *fetcher
+
 	actions *actionsClient
 	audit   *auditLog
 
@@ -57,10 +63,11 @@ type renderer struct {
 	statusStyle  lipgloss.Style
 }
 
-func newRenderer(actions *actionsClient, audit *auditLog) *renderer {
+func newRenderer(actions *actionsClient, audit *auditLog, fetch *fetcher) *renderer {
 	return &renderer{
 		actions:       actions,
 		audit:         audit,
+		fetch:         fetch,
 		durationBuf:   "24h",
 		headerStyle:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12")),
 		sectionStyle:  lipgloss.NewStyle().Bold(true).Underline(true),
@@ -113,10 +120,19 @@ func (r *renderer) view(width, height int) string {
 		return b.String()
 	}
 
-	hdr := fmt.Sprintf("CrowdSec — %d active decisions, %d alerts (last fetch %s)",
+	// Filter hint reflects the current includeCAPI toggle. Default is
+	// origins=crowdsec,cscli (local engine + manual cscli) which is the
+	// "decisions on MY caddy" view. Pressing 'c' switches to ALL origins
+	// (incl. CAPI Threat Intel + community lists) which can be 50k+ rows.
+	filterHint := "filter: local+manual, c: include CAPI"
+	if r.includeCAPI() {
+		filterHint = "filter: ALL, c: hide CAPI"
+	}
+	hdr := fmt.Sprintf("CrowdSec — %d decisions, %d alerts (last fetch %s, %s)",
 		len(r.snap.Decisions),
 		len(r.snap.Alerts),
 		r.snap.FetchedAt.Local().Format("15:04:05"),
+		filterHint,
 	)
 	b.WriteString(r.headerStyle.Render(hdr))
 	b.WriteString("\n")
@@ -262,6 +278,16 @@ func (r *renderer) activeDecisionCount() int {
 	return len(r.snap.Decisions)
 }
 
+// includeCAPI returns the fetcher's CAPI-toggle state. Defensive against
+// nil fetcher (unit tests that build a renderer directly without going
+// through Provision).
+func (r *renderer) includeCAPI() bool {
+	if r.fetch == nil {
+		return false
+	}
+	return r.fetch.IncludeCAPI()
+}
+
 // handleKey is the keyboard state machine. Returns true if Ember should
 // suppress the key (i.e. don't let it bubble up to global tab-bar
 // shortcuts). All confirm/input modes return true for every key to enforce
@@ -292,6 +318,22 @@ func (r *renderer) handleNormal(msg tea.KeyMsg) bool {
 	case "down", "j":
 		if r.selectedIdx < len(r.snap.Decisions)-1 {
 			r.selectedIdx++
+		}
+		return true
+	case "c":
+		// Toggle CAPI inclusion. Next Fetch tick observes the new state;
+		// no forced re-fetch — header already updates immediately so the
+		// user sees the intent took effect.
+		if r.fetch == nil {
+			r.setStatus("error: fetcher not wired")
+			return true
+		}
+		now := !r.fetch.IncludeCAPI()
+		r.fetch.SetIncludeCAPI(now)
+		if now {
+			r.setStatus("CAPI included — next fetch shows ALL origins")
+		} else {
+			r.setStatus("Filter: local+manual — CAPI hidden")
 		}
 		return true
 	case "d":
