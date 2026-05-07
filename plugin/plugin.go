@@ -92,8 +92,9 @@ func (p *CrowdSecPlugin) Fetch(ctx context.Context) (any, error) {
 func (p *CrowdSecPlugin) Update(data any, width, height int) emberplugin.Renderer {
 	if p.render == nil {
 		// Defensive: Ember may call Update before Provision in some startup
-		// paths. Lazy-init an empty renderer so View doesn't panic.
-		p.render = newRenderer()
+		// paths. Lazy-init with nil action/audit deps — write actions are
+		// disabled until Provision wires them up.
+		p.render = newRenderer(nil, nil)
 	}
 	p.render.update(data, width, height)
 	return p
