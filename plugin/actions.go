@@ -55,7 +55,7 @@ func (a *actionsClient) DeleteDecision(ctx context.Context, id int64) error {
 		return err
 	}
 	if status != http.StatusOK {
-		return fmt.Errorf("delete decision %d: status %d: %s", id, status, truncateError(body))
+		return fmt.Errorf("delete decision %d: %s", id, sanitizeAPIError(status, body))
 	}
 	return nil
 }
@@ -134,7 +134,7 @@ func (a *actionsClient) WhitelistIP(ctx context.Context, ip, duration, reason st
 		return err
 	}
 	if status != http.StatusOK && status != http.StatusCreated {
-		return fmt.Errorf("whitelist %s: status %d: %s", ip, status, truncateError(body))
+		return fmt.Errorf("whitelist %s: %s", ip, sanitizeAPIError(status, body))
 	}
 	return nil
 }
@@ -182,15 +182,29 @@ func (a *actionsClient) authedDo(ctx context.Context, method, path string, paylo
 	return nil, 0, errors.New("auth: token rejected twice")
 }
 
-// truncateError returns at most 256 bytes of body for inclusion in error
-// messages — keeps error strings reasonable when LAPI returns long HTML or
-// stack traces.
-func truncateError(body []byte) string {
-	const max = 256
-	if len(body) <= max {
-		return string(body)
+// sanitizeAPIError formats a LAPI error response without leaking arbitrary
+// body content into the error string (which feeds the renderer status line
+// and the audit log). LAPI's standard error envelope is
+// {"message":"...","errors":"..."} — when present we surface only the
+// short message field. On any decode failure we fall back to the bare
+// status code so HTML stack-traces, internal paths, or echoed credentials
+// stay out of err.Error().
+func sanitizeAPIError(statusCode int, body []byte) string {
+	if len(body) == 0 {
+		return fmt.Sprintf("status %d", statusCode)
 	}
-	return string(body[:max]) + "..."
+	var env struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &env); err == nil && env.Message != "" {
+		const max = 200
+		msg := env.Message
+		if len(msg) > max {
+			msg = msg[:max] + "..."
+		}
+		return fmt.Sprintf("status %d: %s", statusCode, msg)
+	}
+	return fmt.Sprintf("status %d", statusCode)
 }
 
 func intPtr(i int32) *int32   { return &i }
