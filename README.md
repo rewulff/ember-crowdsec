@@ -55,6 +55,48 @@ EMBER_PLUGIN_CROWDSEC_BOUNCER_KEY='...' \
 
 `--addr` is the standard Ember flag pointing at the Caddy admin endpoint.
 
+### Production layout (recommended on the LAPI host)
+
+For a permanent install on the Caddy/LAPI host the inline-env quickstart above is fine for a one-shot try, but it puts the credentials on the shell history and the audit log under `/root/`. Use FHS-ish paths instead:
+
+```
+/usr/local/bin/ember-custom            # the binary
+/usr/local/bin/ember-crowdsec          # convenience wrapper, loads env then exec's the binary
+/etc/ember-crowdsec/env                # mode 0600, owned by root
+/var/log/ember-crowdsec/               # mode 0700
+/var/log/ember-crowdsec/audit.log      # mode 0600, written by the plugin
+```
+
+`/etc/ember-crowdsec/env` is a plain `KEY=VALUE` file (no `export`) sourced by the wrapper:
+
+```sh
+EMBER_PLUGIN_CROWDSEC_LAPI_URL=http://127.0.0.1:8080
+EMBER_PLUGIN_CROWDSEC_MACHINE_ID=ember-tui
+EMBER_PLUGIN_CROWDSEC_MACHINE_PASSWORD=...
+EMBER_PLUGIN_CROWDSEC_BOUNCER_KEY=...
+EMBER_PLUGIN_CROWDSEC_ALERTS_SINCE=24h
+EMBER_PLUGIN_CROWDSEC_AUDIT_LOG=/var/log/ember-crowdsec/audit.log
+```
+
+`/usr/local/bin/ember-crowdsec` is a tiny POSIX-sh wrapper:
+
+```sh
+#!/bin/sh
+# Convenience wrapper: load /etc/ember-crowdsec/env then exec the binary.
+set -a
+. /etc/ember-crowdsec/env
+set +a
+exec /usr/local/bin/ember-custom "$@"
+```
+
+Operator entrypoint then becomes one command:
+
+```sh
+ember-crowdsec
+```
+
+The wrapper keeps the plugin a TUI (no systemd/openrc service) — it requires a TTY and is started ad-hoc whenever a human wants to look at the LAPI state.
+
 ## Configuration
 
 All env-vars use the prefix `EMBER_PLUGIN_CROWDSEC_` (the plugin name is `crowdsec`). Ember strips the prefix and lowercases the key before passing it via `PluginConfig.Options`.
