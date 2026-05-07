@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -17,10 +19,12 @@ import (
 //   - emberplugin.Fetcher  (Fetch via fetcher.fetchAll)
 //   - emberplugin.Renderer (Update/View/HandleKey/StatusCount/HelpBindings)
 type CrowdSecPlugin struct {
-	auth   *authClient
-	fetch  *fetcher
-	render *renderer
-	cfg    pluginCfg
+	auth    *authClient
+	fetch   *fetcher
+	actions *actionsClient
+	audit   *auditLog
+	render  *renderer
+	cfg     pluginCfg
 }
 
 // pluginCfg is the parsed Provision-time configuration.
@@ -28,6 +32,8 @@ type pluginCfg struct {
 	lapiURL     string
 	machineID   string
 	password    string
+	bouncerKey  string // X-Api-Key for GET /v1/decisions (Read-path)
+	auditLog    string // append-only JSON-Lines log path
 	alertsSince time.Duration
 	insecureTLS bool
 }
@@ -55,8 +61,19 @@ func (p *CrowdSecPlugin) Provision(_ context.Context, cfg emberplugin.PluginConf
 	p.cfg = parsed
 
 	p.auth = newAuthClient(parsed.lapiURL, parsed.machineID, parsed.password, parsed.insecureTLS)
-	p.fetch = newFetcher(p.auth, parsed.lapiURL, parsed.alertsSince)
-	p.render = newRenderer()
+	p.fetch = newFetcher(p.auth, parsed.lapiURL, parsed.bouncerKey, parsed.alertsSince)
+	p.actions = newActionsClient(p.auth, parsed.lapiURL)
+
+	audit, err := newAuditLog(parsed.auditLog)
+	if err != nil {
+		// Audit-log creation must not block plugin startup. Surface via
+		// renderer status instead so the user sees it in-tab.
+		p.audit = &auditLog{disabled: true, lastErr: err}
+	} else {
+		p.audit = audit
+	}
+
+	p.render = newRenderer(p.actions, p.audit)
 	return nil
 }
 
@@ -90,9 +107,14 @@ func (p *CrowdSecPlugin) View(width, height int) string {
 	return p.render.view(width, height)
 }
 
-// HandleKey is a no-op for the MVP — no filter/sort/details yet.
-func (p *CrowdSecPlugin) HandleKey(_ tea.KeyMsg) bool {
-	return false
+// HandleKey delegates to the renderer which manages the unban/whitelist mode
+// state machine. Returns true to keep the keystroke from bubbling up to Ember
+// when the renderer is in a confirm/input mode (keyboard lock-out).
+func (p *CrowdSecPlugin) HandleKey(msg tea.KeyMsg) bool {
+	if p.render == nil {
+		return false
+	}
+	return p.render.handleKey(msg)
 }
 
 // StatusCount returns the badge text shown next to the tab title. Active
@@ -108,10 +130,14 @@ func (p *CrowdSecPlugin) StatusCount() string {
 	return strconv.Itoa(n)
 }
 
-// HelpBindings returns per-tab footer shortcuts. MVP has none beyond Ember's
-// global "?".
+// HelpBindings returns per-tab footer shortcuts. Iteration 2 adds the unban
+// (d) and whitelist (w) hotkeys for the killer feature.
 func (p *CrowdSecPlugin) HelpBindings() []emberplugin.HelpBinding {
-	return nil
+	return []emberplugin.HelpBinding{
+		{Key: "↑/↓", Desc: "select decision"},
+		{Key: "d", Desc: "unban"},
+		{Key: "w", Desc: "whitelist"},
+	}
 }
 
 // parseOptions extracts and validates Provision-time options.
@@ -135,6 +161,28 @@ func parseOptions(opts map[string]string) (pluginCfg, error) {
 	}
 	if cfg.password == "" {
 		return cfg, errors.New("EMBER_PLUGIN_CROWDSEC_MACHINE_PASSWORD is required")
+	}
+
+	// Bouncer-Key is mandatory: GET /v1/decisions on CrowdSec LAPI accepts
+	// X-Api-Key only (verified via smoke against CT 122 on 2026-05-07: JWT
+	// against /v1/decisions yields 401 "token rejected twice"). The plugin
+	// uses two auth stacks in parallel — JWT for alerts/actions, bouncer-key
+	// for decisions read.
+	cfg.bouncerKey = opts["bouncer_key"]
+	if cfg.bouncerKey == "" {
+		return cfg, errors.New("EMBER_PLUGIN_CROWDSEC_BOUNCER_KEY is required (run: cscli bouncers add ember-tui-bouncer)")
+	}
+
+	// Audit-log path: writeable file for delete/whitelist actions. Default
+	// to the user's home directory so we don't require root for the MVP.
+	cfg.auditLog = opts["audit_log"]
+	if cfg.auditLog == "" {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			cfg.auditLog = ".ember-crowdsec-audit.log"
+		} else {
+			cfg.auditLog = filepath.Join(home, ".ember-crowdsec-audit.log")
+		}
 	}
 
 	if v := opts["alerts_since"]; v != "" {
