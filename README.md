@@ -36,12 +36,20 @@ cscli bouncers add ember-tui-bouncer
 ### 2. Build the custom Ember binary
 
 ```sh
-git clone https://forgejo.routetohome.renewulff.de/formin/ember-crowdsec.git
+git clone https://github.com/rewulff/ember-crowdsec.git
 cd ember-crowdsec
 go build -o ember-custom ./cmd/ember-custom
 ```
 
 The output binary is a full Ember TUI with the CrowdSec plugin compiled in (Go's blank-import pattern, same approach Caddy itself uses for plugins).
+
+Or, in one step without a manual clone:
+
+```sh
+go install github.com/rewulff/ember-crowdsec/cmd/ember-custom@latest
+```
+
+The binary lands in `$(go env GOBIN)` (or `$(go env GOPATH)/bin` if `GOBIN` is unset).
 
 ### 3. Run with environment configuration
 
@@ -180,7 +188,7 @@ LAPI is only reachable from `localhost` on the CrowdSec host by default. This pl
 
 ## Module path
 
-The module is `forgejo.routetohome.renewulff.de/formin/ember-crowdsec`. Go's resolver fetches over HTTPS, so a Forgejo token in `~/.netrc` (or `GOPRIVATE=forgejo.routetohome.renewulff.de` plus a credential helper) is required for `go get` from another machine. Local builds work without that because the source is already checked out.
+The module path is `github.com/rewulff/ember-crowdsec`. `go install github.com/rewulff/ember-crowdsec/cmd/ember-custom@latest` builds the custom Ember binary in one step — no clone, no token, no `GOPRIVATE` needed.
 
 ## Out of scope (MVP)
 
