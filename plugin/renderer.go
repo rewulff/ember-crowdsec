@@ -28,6 +28,13 @@ const (
 // state on screen indefinitely.
 const statusFadeAfter = 5 * time.Second
 
+// helpFooterText is the inline hotkey hint rendered at the bottom of the
+// plugin tab. Ember's global help-overlay (?) only surfaces plugin
+// HelpBindings on core tabs, not on the plugin's own tab — so the plugin
+// renders its own hint to keep hotkeys discoverable. Suppressed during
+// confirm/input modes, which carry their own prompts.
+const helpFooterText = "↑/↓ select · c toggle CAPI · d unban (local only) · w whitelist"
+
 // renderer holds the latest snapshot, the mode-state for the
 // unban/whitelist UX, and lipgloss styles. Safe for concurrent use:
 // Ember calls Update from the fetch goroutine and View+HandleKey from
@@ -117,6 +124,13 @@ func (r *renderer) view(width, height int) string {
 	if !r.hasData {
 		b.WriteString(r.headerStyle.Render("CrowdSec — waiting for first fetch..."))
 		b.WriteString("\n")
+		// Pre-data: still show the footer so the user knows what's bound
+		// before the first snapshot arrives.
+		if r.mode == modeNormal {
+			b.WriteString("\n")
+			b.WriteString(r.dimStyle.Render(helpFooterText))
+			b.WriteString("\n")
+		}
 		return b.String()
 	}
 
@@ -160,6 +174,15 @@ func (r *renderer) view(width, height int) string {
 	if status := r.renderStatus(); status != "" {
 		b.WriteString("\n")
 		b.WriteString(status)
+		b.WriteString("\n")
+	}
+
+	// Inline help footer. Only shown in normal mode — confirm/input dialogs
+	// have their own "[y/N]" / "Enter to confirm" hints, doubling up would
+	// be visual noise.
+	if r.mode == modeNormal {
+		b.WriteString("\n")
+		b.WriteString(r.dimStyle.Render(helpFooterText))
 		b.WriteString("\n")
 	}
 

@@ -954,3 +954,66 @@ func TestRenderer_AllowUnbanLocal(t *testing.T) {
 		t.Errorf("DELETE was sent despite cancel, got %d hits", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Test 15: Inline help footer is visible in normal mode
+// ---------------------------------------------------------------------------
+
+// Ember's global help-overlay does not surface plugin HelpBindings on the
+// plugin tab itself, so the renderer paints its own hint at the bottom of
+// View(). This test just locks in that the footer string is present after a
+// regular fetch + render in normal mode.
+func TestRenderer_HelpFooterVisible(t *testing.T) {
+	t.Parallel()
+
+	m := newMockLAPI(t)
+	p := provisionPlugin(t, m)
+	_ = fetchAndUpdate(t, p)
+
+	view := p.View(80, 24)
+	if !strings.Contains(view, helpFooterText) {
+		t.Errorf("View missing help-footer text %q\nview:\n%s", helpFooterText, view)
+	}
+	// Belt-and-braces: the user-facing hotkey label should be there too,
+	// independent of the const symbol — protects against accidental const
+	// edits that would still match the test against itself.
+	if !strings.Contains(view, "toggle CAPI") {
+		t.Errorf("View missing 'toggle CAPI' hint\nview:\n%s", view)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 16: Inline help footer is hidden during confirm/input modes
+// ---------------------------------------------------------------------------
+
+// In confirm/input modes the dialog has its own "[y/N]" / "Enter to confirm"
+// prompt — duplicating the global hotkey list under it is visual noise and
+// also misleading (those hotkeys don't apply while the dialog has the
+// keyboard lock).
+func TestRenderer_HelpFooterHiddenInConfirm(t *testing.T) {
+	t.Parallel()
+
+	m := newMockLAPI(t)
+	p := provisionPlugin(t, m)
+	_ = fetchAndUpdate(t, p)
+
+	// Press 'd' on first decision (top of list, crowdsec origin) to enter
+	// modeConfirmUnban.
+	if !p.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}}) {
+		t.Fatal("HandleKey('d') returned false")
+	}
+	p.render.mu.RLock()
+	mode := p.render.mode
+	p.render.mu.RUnlock()
+	if mode != modeConfirmUnban {
+		t.Fatalf("mode = %v, want modeConfirmUnban", mode)
+	}
+
+	view := p.View(80, 24)
+	if strings.Contains(view, "toggle CAPI") {
+		t.Errorf("View contains help-footer hint during confirm mode (should be hidden)\nview:\n%s", view)
+	}
+	if strings.Contains(view, helpFooterText) {
+		t.Errorf("View contains helpFooterText const during confirm mode\nview:\n%s", view)
+	}
+}
