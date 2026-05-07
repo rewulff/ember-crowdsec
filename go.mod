@@ -1,4 +1,4 @@
-module forgejo.routetohome.renewulff.de/formin/ember-crowdsec
+module github.com/rewulff/ember-crowdsec
 
 go 1.26.2
 

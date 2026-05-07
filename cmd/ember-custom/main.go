@@ -11,7 +11,7 @@ import (
 	"github.com/alexandre-daubois/ember"
 
 	// Side-effect import: registers the CrowdSec plugin via init().
-	_ "forgejo.routetohome.renewulff.de/formin/ember-crowdsec/plugin"
+	_ "github.com/rewulff/ember-crowdsec/plugin"
 )
 
 func main() {
