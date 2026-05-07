@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,6 +65,12 @@ type mockLAPI struct {
 	// Captured POST /v1/alerts bodies for whitelist verification.
 	postedAlertsMu sync.Mutex
 	postedAlerts   [][]alertCreateRequest
+
+	// lastDecisionsQuery captures the raw query string of the most recent
+	// GET /v1/decisions, so origin-filter tests can assert on it without
+	// shipping a custom transport.
+	lastDecisionsMu    sync.Mutex
+	lastDecisionsQuery string
 }
 
 func newMockLAPI(t *testing.T) *mockLAPI {
@@ -158,9 +165,16 @@ func (m *mockLAPI) handleDecisions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Three decisions: two long-lived bans + one short. Plugin sorts by TTL
-	// desc so order in render is 4h > 1h > 10m.
-	out := []Decision{
+	// Capture raw query for tests asserting on the origins filter.
+	m.lastDecisionsMu.Lock()
+	m.lastDecisionsQuery = r.URL.RawQuery
+	m.lastDecisionsMu.Unlock()
+
+	// Mimic LAPI's server-side origin filter. ?origins=a,b restricts the
+	// response to those origins; absent param returns all origins. Three
+	// decisions: two operator-controlled (crowdsec + cscli) + one CAPI/list
+	// row to exercise the CAPI-block + filter paths.
+	all := []Decision{
 		{
 			ID: 1, Origin: "crowdsec", Type: "ban", Scope: "Ip",
 			Value: m.decisionValues[0], Scenario: "crowdsecurity/http-bf", Duration: "4h0m0s",
@@ -174,8 +188,31 @@ func (m *mockLAPI) handleDecisions(w http.ResponseWriter, r *http.Request) {
 			Value: m.decisionValues[2], Scenario: "lists/firehol_cybercrime", Duration: "10m0s",
 		},
 	}
+
+	out := all
+	if originsParam := r.URL.Query().Get("origins"); originsParam != "" {
+		allowed := map[string]bool{}
+		for _, o := range strings.Split(originsParam, ",") {
+			allowed[strings.TrimSpace(o)] = true
+		}
+		out = out[:0]
+		for _, d := range all {
+			if allowed[d.Origin] {
+				out = append(out, d)
+			}
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+// lastDecisionsQueryStr returns a thread-safe copy of the most recent
+// GET /v1/decisions raw query string.
+func (m *mockLAPI) lastDecisionsQueryStr() string {
+	m.lastDecisionsMu.Lock()
+	defer m.lastDecisionsMu.Unlock()
+	return m.lastDecisionsQuery
 }
 
 func (m *mockLAPI) handleAlerts(w http.ResponseWriter, r *http.Request) {
@@ -365,8 +402,10 @@ func TestLAPI_HappyPath(t *testing.T) {
 	if snap.Err != nil {
 		t.Fatalf("snapshot.Err = %v, want nil", snap.Err)
 	}
-	if got, want := len(snap.Decisions), 3; got != want {
-		t.Fatalf("decisions count = %d, want %d", got, want)
+	// Default filter is origins=crowdsec,cscli (Iteration 3). Mock returns
+	// 2 of 3 mock decisions (firehol-list is filtered out server-side).
+	if got, want := len(snap.Decisions), 2; got != want {
+		t.Fatalf("decisions count = %d, want %d (default filter dropped firehol-list)", got, want)
 	}
 	if got, want := len(snap.Alerts), 2; got != want {
 		t.Fatalf("alerts count = %d, want %d", got, want)
@@ -379,16 +418,18 @@ func TestLAPI_HappyPath(t *testing.T) {
 
 	view := p.View(100, 30)
 
-	// At least one decision IP must surface in View output.
+	// At least one of the kept decision IPs must surface in View output.
+	// Skip the firehol IP (m.decisionValues[2]) which the default filter
+	// removes server-side.
 	foundIP := false
-	for _, ip := range m.decisionValues {
+	for _, ip := range m.decisionValues[:2] {
 		if strings.Contains(view, ip) {
 			foundIP = true
 			break
 		}
 	}
 	if !foundIP {
-		t.Errorf("View did not contain any decision IP from %v\nview:\n%s", m.decisionValues, view)
+		t.Errorf("View did not contain any decision IP from %v\nview:\n%s", m.decisionValues[:2], view)
 	}
 
 	// Alerts scenario must surface.
@@ -396,8 +437,8 @@ func TestLAPI_HappyPath(t *testing.T) {
 		t.Errorf("View missing alerts scenario %q\nview:\n%s", m.alertsScenario, view)
 	}
 
-	// StatusCount() must equal the number of active decisions ("3").
-	if got, want := p.StatusCount(), "3"; got != want {
+	// StatusCount() must equal the number of active decisions ("2").
+	if got, want := p.StatusCount(), "2"; got != want {
 		t.Errorf("StatusCount = %q, want %q", got, want)
 	}
 }
@@ -505,7 +546,8 @@ func TestDecisions_BouncerKeyHeader(t *testing.T) {
 	if snap.Err != nil {
 		t.Fatalf("snapshot.Err = %v, want nil (decisions auth header regressed?)", snap.Err)
 	}
-	if got, want := len(snap.Decisions), 3; got != want {
+	// Iter 3 default filter drops the firehol-list mock; expect 2 kept.
+	if got, want := len(snap.Decisions), 2; got != want {
 		t.Fatalf("decisions count = %d, want %d", got, want)
 	}
 }
@@ -697,5 +739,218 @@ func TestRenderer_WhitelistFlow(t *testing.T) {
 	entries := auditLines(t, p)
 	if len(entries) != 1 || entries[0].Action != "whitelist" || entries[0].Duration != "1h" {
 		t.Errorf("audit = %+v, want whitelist/1h", entries)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 10: Default fetch carries origins=crowdsec,cscli filter
+// ---------------------------------------------------------------------------
+
+// Locks in the Iteration 3 default: GET /v1/decisions must server-side filter
+// to the operator-controlled origins. Without this, on a busy CrowdSec node
+// the response can be 50k+ rows (CAPI Threat Intel + community lists) and
+// overwhelms the TUI for the wrong reason.
+func TestFetcher_DefaultOriginsFilter(t *testing.T) {
+	t.Parallel()
+
+	m := newMockLAPI(t)
+	p := provisionPlugin(t, m)
+
+	snap := fetchAndUpdate(t, p)
+
+	if snap.Err != nil {
+		t.Fatalf("snapshot.Err = %v, want nil", snap.Err)
+	}
+	q := m.lastDecisionsQueryStr()
+	values, err := url.ParseQuery(q)
+	if err != nil {
+		t.Fatalf("parse query %q: %v", q, err)
+	}
+	got := values.Get("origins")
+	if got != "crowdsec,cscli" {
+		t.Errorf("origins query param = %q, want %q (raw query: %q)", got, "crowdsec,cscli", q)
+	}
+	// Mock filters server-side, so the firehol-list row is dropped.
+	if n := len(snap.Decisions); n != 2 {
+		t.Errorf("decisions = %d, want 2 after default filter", n)
+	}
+	for _, d := range snap.Decisions {
+		if !originLocal(d.Origin) {
+			t.Errorf("default fetch returned non-local origin %q (decision %d)", d.Origin, d.ID)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 11: showCAPI=true drops the origins filter
+// ---------------------------------------------------------------------------
+
+// When the user toggles 'c' on, the next fetch must not carry an origins
+// param. Mock returns all 3 decisions in this case (incl. firehol-list).
+func TestFetcher_ShowCAPI_NoFilter(t *testing.T) {
+	t.Parallel()
+
+	m := newMockLAPI(t)
+	p := provisionPlugin(t, m)
+
+	p.fetch.SetIncludeCAPI(true)
+
+	snap := fetchAndUpdate(t, p)
+
+	if snap.Err != nil {
+		t.Fatalf("snapshot.Err = %v, want nil", snap.Err)
+	}
+	q := m.lastDecisionsQueryStr()
+	values, err := url.ParseQuery(q)
+	if err != nil {
+		t.Fatalf("parse query %q: %v", q, err)
+	}
+	if got := values.Get("origins"); got != "" {
+		t.Errorf("origins query param = %q, want empty when includeCAPI=true (raw: %q)", got, q)
+	}
+	if n := len(snap.Decisions); n != 3 {
+		t.Errorf("decisions = %d, want 3 with no filter (incl. firehol-list)", n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 12: Hotkey 'c' toggles includeCAPI and updates the header
+// ---------------------------------------------------------------------------
+
+// Verifies the renderer-side wiring: pressing 'c' must flip the fetcher's
+// atomic and the header text must reflect the new state immediately.
+func TestRenderer_ToggleCAPI(t *testing.T) {
+	t.Parallel()
+
+	m := newMockLAPI(t)
+	p := provisionPlugin(t, m)
+	_ = fetchAndUpdate(t, p)
+
+	if p.fetch.IncludeCAPI() {
+		t.Fatal("includeCAPI default = true, want false")
+	}
+	view := p.View(120, 40)
+	if !strings.Contains(view, "filter: local+manual, c: include CAPI") {
+		t.Errorf("default view header missing filter hint:\n%s", view)
+	}
+
+	if !p.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}}) {
+		t.Fatal("HandleKey('c') returned false, want true (key consumed)")
+	}
+	if !p.fetch.IncludeCAPI() {
+		t.Fatal("after 'c' includeCAPI = false, want true")
+	}
+	view = p.View(120, 40)
+	if !strings.Contains(view, "filter: ALL, c: hide CAPI") {
+		t.Errorf("after-toggle view header missing CAPI-on hint:\n%s", view)
+	}
+
+	// Toggle back.
+	if !p.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}}) {
+		t.Fatal("HandleKey('c') second press returned false")
+	}
+	if p.fetch.IncludeCAPI() {
+		t.Fatal("after second 'c' includeCAPI = true, want false")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 13: 'd' on a CAPI/list decision is blocked with a status hint
+// ---------------------------------------------------------------------------
+
+// Selects the firehol-list row (only visible when CAPI is included), presses
+// 'd', and asserts: no confirm dialog opens, mode stays normal, status line
+// suggests whitelist, and no DELETE request was sent.
+func TestRenderer_BlockUnbanCAPI(t *testing.T) {
+	t.Parallel()
+
+	m := newMockLAPI(t)
+	p := provisionPlugin(t, m)
+	p.fetch.SetIncludeCAPI(true) // need the firehol row visible
+	_ = fetchAndUpdate(t, p)
+
+	// Locate the non-local decision in the snapshot order; sort is by TTL
+	// desc so the 10m firehol row is last.
+	idx := -1
+	for i, d := range p.render.snap.Decisions {
+		if !originLocal(d.Origin) {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		t.Fatalf("no non-local decision in snapshot: %+v", p.render.snap.Decisions)
+	}
+	p.render.mu.Lock()
+	p.render.selectedIdx = idx
+	p.render.mu.Unlock()
+
+	beforeDeletes := m.deleteDecisionsHits.Load()
+	beforeAuditLines := len(auditLines(t, p))
+
+	if !p.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}}) {
+		t.Fatal("HandleKey('d') returned false, want true (key consumed)")
+	}
+
+	// Mode must stay normal — no confirm dialog.
+	p.render.mu.RLock()
+	mode := p.render.mode
+	status := p.render.statusLine
+	pending := p.render.pendingDecision
+	p.render.mu.RUnlock()
+	if mode != modeNormal {
+		t.Errorf("mode = %v after blocked 'd', want modeNormal", mode)
+	}
+	if pending != nil {
+		t.Errorf("pendingDecision = %+v after blocked 'd', want nil", pending)
+	}
+	if !strings.Contains(status, "Cannot unban") || !strings.Contains(status, "whitelist") {
+		t.Errorf("status line = %q, want hint about whitelist", status)
+	}
+	if got := m.deleteDecisionsHits.Load(); got != beforeDeletes {
+		t.Errorf("DELETE was sent (%d -> %d) but block should prevent it", beforeDeletes, got)
+	}
+	if got := len(auditLines(t, p)); got != beforeAuditLines {
+		t.Errorf("audit log grew (%d -> %d) on blocked unban; nothing should be recorded", beforeAuditLines, got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 14: 'd' on a local (crowdsec) decision still opens the confirm dialog
+// ---------------------------------------------------------------------------
+
+// Sister-test to TestRenderer_BlockUnbanCAPI: makes sure we did not over-block
+// — origin "crowdsec" must still produce the confirm dialog. Pressing 'n'
+// cancels so we don't actually hit DELETE here.
+func TestRenderer_AllowUnbanLocal(t *testing.T) {
+	t.Parallel()
+
+	m := newMockLAPI(t)
+	p := provisionPlugin(t, m)
+	_ = fetchAndUpdate(t, p)
+
+	// Top-of-list after sort by TTL desc is the 4h crowdsec decision.
+	if !p.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}}) {
+		t.Fatal("HandleKey('d') returned false")
+	}
+
+	p.render.mu.RLock()
+	mode := p.render.mode
+	pending := p.render.pendingDecision
+	p.render.mu.RUnlock()
+
+	if mode != modeConfirmUnban {
+		t.Fatalf("mode = %v after 'd' on local decision, want modeConfirmUnban", mode)
+	}
+	if pending == nil || !originLocal(pending.Origin) {
+		t.Fatalf("pendingDecision = %+v, want non-nil with local origin", pending)
+	}
+
+	// Cancel so we don't fire DELETE.
+	if !p.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}}) {
+		t.Fatal("HandleKey('n') returned false")
+	}
+	if got := m.deleteDecisionsHits.Load(); got != 0 {
+		t.Errorf("DELETE was sent despite cancel, got %d hits", got)
 	}
 }
