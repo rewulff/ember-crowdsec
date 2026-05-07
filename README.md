@@ -155,4 +155,4 @@ These will land in a follow-up release sprint once the plugin API stabilizes ups
 
 ## License
 
-TBD (mirrors Ember's eventual choice once their license is finalized; placeholder until then).
+MIT — see [LICENSE](LICENSE).
