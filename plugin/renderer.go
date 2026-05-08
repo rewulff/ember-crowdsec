@@ -210,8 +210,18 @@ func (r *renderer) renderDecisions(limit int) string {
 		return r.dimStyle.Render("  (none)") + "\n"
 	}
 	var b strings.Builder
+	// iter-12: header is pure ASCII, NOT wrapped in r.dimStyle.Render(...).
+	// Lipgloss Render() expects a string with no embedded newlines: when the
+	// arg contains "\n", lipgloss inserts ANSI style + reset sequences
+	// relative to that newline, which xtermjs (Proxmox web VNC) interprets
+	// as "cursor stays on the same line" — the next data line (= the
+	// selected first decision) then renders ON TOP of the header. Iter-11
+	// already removed the lipgloss wrap from the selected row; the visual
+	// overlap persisted, so the dimStyle-wrapped header (which has the
+	// embedded \n) is the next suspect. Phase-1 diagnosis: drop the
+	// dimStyle here. If this fixes the overlap, hypothesis confirmed.
 	header := fmt.Sprintf("  %-19s %-12s %-30s %s\n", "VALUE", "ORIGIN", "SCENARIO", "TTL-REM")
-	b.WriteString(r.dimStyle.Render(header))
+	b.WriteString(header)
 
 	n := len(r.snap.Decisions)
 	if n > limit {
@@ -243,7 +253,9 @@ func (r *renderer) renderDecisions(limit int) string {
 		b.WriteString("\n")
 	}
 	if len(r.snap.Decisions) > limit {
-		b.WriteString(r.dimStyle.Render(fmt.Sprintf("  ... %d more\n", len(r.snap.Decisions)-limit)))
+		// iter-12: pure ASCII (see header rationale above), embedded \n in
+		// dimStyle.Render arg is the suspected xtermjs render-glitch trigger.
+		b.WriteString(fmt.Sprintf("  ... %d more\n", len(r.snap.Decisions)-limit))
 	}
 	return b.String()
 }
@@ -253,8 +265,9 @@ func (r *renderer) renderAlerts(limit int) string {
 		return r.dimStyle.Render("  (none)") + "\n"
 	}
 	var b strings.Builder
+	// iter-12: pure ASCII header, see renderDecisions rationale.
 	header := fmt.Sprintf("  %-7s %-30s %-19s %s\n", "ID", "SCENARIO", "SOURCE", "CREATED")
-	b.WriteString(r.dimStyle.Render(header))
+	b.WriteString(header)
 
 	n := len(r.snap.Alerts)
 	if n > limit {
@@ -275,7 +288,8 @@ func (r *renderer) renderAlerts(limit int) string {
 		))
 	}
 	if len(r.snap.Alerts) > limit {
-		b.WriteString(r.dimStyle.Render(fmt.Sprintf("  ... %d more\n", len(r.snap.Alerts)-limit)))
+		// iter-12: pure ASCII (see renderDecisions rationale).
+		b.WriteString(fmt.Sprintf("  ... %d more\n", len(r.snap.Alerts)-limit))
 	}
 	return b.String()
 }
