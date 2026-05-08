@@ -956,13 +956,14 @@ func TestRenderer_AllowUnbanLocal(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 15: Inline help footer is visible in normal mode
+// Test 15: FooterText returns the hotkey hint in normal mode
 // ---------------------------------------------------------------------------
 
-// Ember's global help-overlay does not surface plugin HelpBindings on the
-// plugin tab itself, so the renderer paints its own hint at the bottom of
-// View(). This test just locks in that the footer string is present after a
-// regular fetch + render in normal mode.
+// The plugin used to paint its own footer inline at the bottom of View().
+// Iteration 9 moved the footer to Ember's FooterRenderer hook so the hint
+// shares the global footer line. This test locks in that
+// CrowdSecPlugin.FooterText(width) returns the helpFooterText constant in
+// normal mode after a regular fetch + render.
 func TestRenderer_HelpFooterVisible(t *testing.T) {
 	t.Parallel()
 
@@ -970,26 +971,31 @@ func TestRenderer_HelpFooterVisible(t *testing.T) {
 	p := provisionPlugin(t, m)
 	_ = fetchAndUpdate(t, p)
 
-	view := p.View(80, 24)
-	if !strings.Contains(view, helpFooterText) {
-		t.Errorf("View missing help-footer text %q\nview:\n%s", helpFooterText, view)
+	got := p.FooterText(80)
+	if got != helpFooterText {
+		t.Errorf("FooterText(80) = %q, want %q", got, helpFooterText)
 	}
 	// Belt-and-braces: the user-facing hotkey label should be there too,
 	// independent of the const symbol — protects against accidental const
 	// edits that would still match the test against itself.
-	if !strings.Contains(view, "toggle CAPI") {
-		t.Errorf("View missing 'toggle CAPI' hint\nview:\n%s", view)
+	if !strings.Contains(got, "toggle CAPI") {
+		t.Errorf("FooterText missing 'toggle CAPI' hint, got %q", got)
+	}
+	// And the inline-footer must NOT appear in View() any more — the
+	// render path should be footer-free now that the global hook owns it.
+	view := p.View(80, 24)
+	if strings.Contains(view, helpFooterText) {
+		t.Errorf("View() still renders helpFooterText inline; should be empty\nview:\n%s", view)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Test 16: Inline help footer is hidden during confirm/input modes
+// Test 16: FooterText returns empty during confirm/input modes
 // ---------------------------------------------------------------------------
 
 // In confirm/input modes the dialog has its own "[y/N]" / "Enter to confirm"
-// prompt — duplicating the global hotkey list under it is visual noise and
-// also misleading (those hotkeys don't apply while the dialog has the
-// keyboard lock).
+// prompt and our hotkeys don't apply (keyboard is locked to the dialog).
+// Returning "" lets Ember's default footer surface through.
 func TestRenderer_HelpFooterHiddenInConfirm(t *testing.T) {
 	t.Parallel()
 
@@ -1009,11 +1015,22 @@ func TestRenderer_HelpFooterHiddenInConfirm(t *testing.T) {
 		t.Fatalf("mode = %v, want modeConfirmUnban", mode)
 	}
 
-	view := p.View(80, 24)
-	if strings.Contains(view, "toggle CAPI") {
-		t.Errorf("View contains help-footer hint during confirm mode (should be hidden)\nview:\n%s", view)
+	if got := p.FooterText(80); got != "" {
+		t.Errorf("FooterText(80) = %q during confirm mode, want empty", got)
 	}
-	if strings.Contains(view, helpFooterText) {
-		t.Errorf("View contains helpFooterText const during confirm mode\nview:\n%s", view)
+}
+
+// ---------------------------------------------------------------------------
+// Test 17: FooterText handles pre-provision / nil-renderer gracefully
+// ---------------------------------------------------------------------------
+
+// Ember can call FooterText very early in the lifecycle (before Provision
+// finishes wiring the renderer up). Empty string is the contract.
+func TestRenderer_HelpFooterPreProvision(t *testing.T) {
+	t.Parallel()
+
+	p := &CrowdSecPlugin{} // never provisioned
+	if got := p.FooterText(80); got != "" {
+		t.Errorf("FooterText on un-provisioned plugin = %q, want empty", got)
 	}
 }

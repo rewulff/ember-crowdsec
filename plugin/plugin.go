@@ -146,6 +146,19 @@ func (p *CrowdSecPlugin) HelpBindings() []emberplugin.HelpBinding {
 	}
 }
 
+// FooterText satisfies emberplugin.FooterRenderer. Returns the plugin's
+// hotkey hint while the renderer is in normal mode. Confirm/input modes
+// have their own inline prompts ("[y/N]", "Enter to confirm") and let
+// the default Ember footer surface; doubling up would be visual noise
+// and the global hotkeys don't apply during the keyboard-locked dialog
+// anyway. Width is unused for now (hint fits comfortably in 80 cols).
+func (p *CrowdSecPlugin) FooterText(_ int) string {
+	if p.render == nil {
+		return ""
+	}
+	return p.render.footerText()
+}
+
 // parseOptions extracts and validates Provision-time options.
 func parseOptions(opts map[string]string) (pluginCfg, error) {
 	cfg := pluginCfg{
