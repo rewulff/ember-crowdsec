@@ -47,6 +47,19 @@ const (
 // confirm/input modes, which carry their own prompts.
 const helpFooterText = "↑/↓ select · c toggle CAPI · d unban (local only) · w whitelist"
 
+// durationSteps is the discrete duration ladder shown in modeInputDuration.
+// v0.1.0 stays on stepped selection because Ember v1.3.0's tab-switch
+// hotkey reserves digits 1..9 globally — the plugin never sees a digit
+// keypress while a modal is open, so free-form duration input is
+// impossible. v0.2.0 (after upstream digit-forward + FooterRenderer PRs
+// land) restores free-form input. See ROADMAP.md.
+var durationSteps = []string{"30m", "1h", "4h", "12h", "24h", "7d"}
+
+// defaultDurationStepIdx points at "24h" (= ehemaliger Default before the
+// stepped UI) so the first Enter without arrow-key navigation reproduces
+// the previous behaviour.
+const defaultDurationStepIdx = 4
+
 // renderer holds the latest snapshot, the mode-state for the
 // unban/whitelist UX, and lipgloss styles. Safe for concurrent use:
 // Ember calls Update from the fetch goroutine and View+HandleKey from
@@ -68,7 +81,8 @@ type renderer struct {
 	// Selection / mode state.
 	selectedIdx     int
 	mode            renderMode
-	durationBuf     string // built up in modeInputDuration
+	durationBuf     string // resolved value at confirm-whitelist time
+	durationStepIdx int    // index into durationSteps in modeInputDuration
 	pendingDecision *Decision
 	statusLine      string
 	statusAt        time.Time
@@ -97,10 +111,11 @@ var (
 
 func newRenderer(actions *actionsClient, audit *auditLog, fetch *fetcher) *renderer {
 	return &renderer{
-		actions:     actions,
-		audit:       audit,
-		fetch:       fetch,
-		durationBuf: "24h",
+		actions:         actions,
+		audit:           audit,
+		fetch:           fetch,
+		durationBuf:     durationSteps[defaultDurationStepIdx],
+		durationStepIdx: defaultDurationStepIdx,
 		// titleStyle = Embers titleStyle: Bold + ember-accent. Used for
 		// the tab header line and the section labels ("Decisions ...",
 		// "Recent alerts"). Mirrors styles.go:11-13.
@@ -234,18 +249,23 @@ func (r *renderer) view(width, height int) string {
 		b.WriteString("\n")
 	}
 
-	// Footer is now surfaced via Ember's FooterRenderer hook (see
-	// CrowdSecPlugin.FooterText / footerText below) — no inline render
-	// here. The plugin's struct method delegates to footerText() which
-	// reads the same r.mode gating.
+	// Inline help footer — only in modeNormal. Stock Ember v1.3.0 has no
+	// FooterRenderer interface to override the global footer; we render
+	// our hotkeys here in the tab body instead. v0.2.0 (post upstream
+	// FooterRenderer PR) replaces this with footer-side hints. See
+	// ROADMAP.md. greyStyle (subtle FG) keeps the row visually distinct
+	// from the title rows. Render-arg has NO embedded newline so lipgloss
+	// can't insert ANSI resets mid-line (iter-12 lesson).
+	if r.mode == modeNormal {
+		b.WriteString("\n")
+		b.WriteString(r.greyStyle.Render(helpFooterText))
+		b.WriteString("\n")
+	}
 
 	// Trailing spacer lines stabilise the tab's vertical extent for
-	// Ember's tab-layout engine. After iter-9 removed the inline help
-	// footer, this tab produced ~2 lines fewer than the dense core tabs
-	// (Caddy, Logs, ...) and Ember subtly re-scaled the content, making
-	// it look "minimal kleiner" than the others. Two reserved newlines
-	// here restore parity without re-introducing footer text.
-	b.WriteString("\n\n")
+	// Ember's tab-layout engine. Even with the inline footer we keep one
+	// extra spacer for parity with the dense core tabs (Caddy, Logs, ...).
+	b.WriteString("\n")
 
 	return b.String()
 }
@@ -371,7 +391,23 @@ func (r *renderer) renderDialog() string {
 			d.Value, d.Origin, d.Scenario)
 		return r.dialogStyle.Render(body)
 	case modeInputDuration:
-		body := fmt.Sprintf("Whitelist duration: %s_  (Enter to confirm, Esc to cancel)", r.durationBuf)
+		// Render the duration ladder with the active step bracketed. Stock
+		// Ember v1.3.0 swallows digits 1..9 globally for tab-switch, so a
+		// free-form text input is impossible from a plugin modal — the
+		// stepped ladder is the v0.1.0 substitute (see ROADMAP.md, lifted
+		// in v0.2.0 once upstream digit-forward PR lands).
+		var ladder strings.Builder
+		for i, step := range durationSteps {
+			if i > 0 {
+				ladder.WriteString("  ")
+			}
+			if i == r.durationStepIdx {
+				ladder.WriteString("[" + step + "]")
+			} else {
+				ladder.WriteString(" " + step + " ")
+			}
+		}
+		body := fmt.Sprintf("Whitelist duration: %s  (←/→ select, Enter to confirm, Esc to cancel)", ladder.String())
 		return r.dialogStyle.Render(body)
 	case modeConfirmWhitelist:
 		if r.pendingDecision == nil {
@@ -503,9 +539,10 @@ func (r *renderer) handleNormal(msg tea.KeyMsg) bool {
 	case "w":
 		if d := r.currentDecision(); d != nil {
 			r.pendingDecision = d
-			if r.durationBuf == "" {
-				r.durationBuf = "24h"
-			}
+			// Reset to the canonical default each time the dialog opens
+			// so a previously-touched ladder doesn't carry over silently.
+			r.durationStepIdx = defaultDurationStepIdx
+			r.durationBuf = durationSteps[defaultDurationStepIdx]
 			r.mode = modeInputDuration
 		} else {
 			r.setStatus("no decision selected")
@@ -553,33 +590,65 @@ func (r *renderer) handleConfirmUnban(msg tea.KeyMsg) bool {
 	return true
 }
 
+// handleInputDuration drives the stepped duration ladder. Stock Ember
+// v1.3.0 reserves digits 1..9 globally for tab-switch and never forwards
+// them to the active plugin's modal — free-form text input ("48h" typed
+// into a buffer) is therefore unreachable in the v0.1.0 architecture.
+// The ladder (`30m / 1h / 4h / 12h / 24h / 7d`) is navigable via arrows
+// or vim-keys and confirmed with Enter; Esc cancels back to normal. The
+// `7d`-style strings parse cleanly via time.ParseDuration with the trick
+// of expanding the trailing "d" to hours below.
 func (r *renderer) handleInputDuration(msg tea.KeyMsg) bool {
 	switch msg.String() {
+	case "up", "right", "k", "l":
+		if r.durationStepIdx < len(durationSteps)-1 {
+			r.durationStepIdx++
+		}
+		return true
+	case "down", "left", "j", "h":
+		if r.durationStepIdx > 0 {
+			r.durationStepIdx--
+		}
+		return true
 	case "enter":
-		if _, err := time.ParseDuration(r.durationBuf); err != nil {
-			r.setStatus(fmt.Sprintf("error: invalid duration %q", r.durationBuf))
+		// Step values are constants — defensive parse covers a future
+		// edit accidentally introducing an unparseable entry. "7d" needs
+		// expansion because time.ParseDuration doesn't accept "d".
+		picked := durationSteps[r.durationStepIdx]
+		if _, err := parseLadderDuration(picked); err != nil {
+			r.setStatus(fmt.Sprintf("error: invalid duration %q", picked))
 			return true
 		}
+		r.durationBuf = picked
 		r.mode = modeConfirmWhitelist
 		return true
 	case "esc":
 		r.mode = modeNormal
 		r.pendingDecision = nil
 		return true
-	case "backspace":
-		if len(r.durationBuf) > 0 {
-			r.durationBuf = r.durationBuf[:len(r.durationBuf)-1]
-		}
-		return true
 	}
-	// Append printable single-char keys. Bubble Tea reports them as their
-	// literal string ("a", "1", "h", ...). Filter anything multi-char that
-	// isn't a known printable name.
-	s := msg.String()
-	if len(s) == 1 && s[0] >= 0x20 && s[0] < 0x7f {
-		r.durationBuf += s
-	}
+	// Any other key (digits, letters, backspace) is consumed silently —
+	// stock Ember swallows digits anyway, but for keys that DO arrive we
+	// must not let them bubble up and fire global hotkeys mid-dialog.
 	return true
+}
+
+// parseLadderDuration accepts the same Go-duration grammar as
+// time.ParseDuration plus a trailing "d" for days (e.g. "7d" -> 168h).
+// CrowdSec LAPI accepts both forms in the wire payload, but the Go
+// stdlib parser doesn't — and the audit-log writer round-trips the
+// raw string, so we keep the user-facing label as "7d" while still
+// validating it locally. Returns the parsed duration or an error.
+func parseLadderDuration(s string) (time.Duration, error) {
+	if strings.HasSuffix(s, "d") {
+		// "7d" -> "168h"
+		var days int
+		if _, err := fmt.Sscanf(s, "%dd", &days); err != nil {
+			return 0, fmt.Errorf("parse %q: %w", s, err)
+		}
+		return time.Duration(days) * 24 * time.Hour, nil
+	}
+	return time.ParseDuration(s)
 }
 
 func (r *renderer) handleConfirmWhitelist(msg tea.KeyMsg) bool {
