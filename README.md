@@ -50,10 +50,12 @@ The output binary is a full Ember TUI with the CrowdSec plugin compiled in (Go's
 Or, in one step without a manual clone:
 
 ```sh
-go install github.com/rewulff/ember-crowdsec/cmd/ember-custom@latest
+go install github.com/rewulff/ember-crowdsec/cmd/ember-custom@v0.1.0
 ```
 
 The binary lands in `$(go env GOBIN)` (or `$(go env GOPATH)/bin` if `GOBIN` is unset).
+
+> **Which tag to install?** `@v0.1.0` is the supported stock-pinned release that works with Ember `v1.3.0` out of the box, with documented caveats (stepped whitelist duration, inline hotkey hints — see "Killer feature" below). The `main` branch is rolling and assumes upstream Ember PRs that haven't landed yet (`go install ...@main` builds, but the new UX features are no-ops until a future Ember release ships them). See [`ROADMAP.md`](ROADMAP.md) for v0.1.0 → v0.2.0 migration.
 
 ### 3. Run with environment configuration
 
@@ -209,7 +211,7 @@ LAPI is only reachable from `localhost` on the CrowdSec host by default. This pl
 
 ## Module path
 
-The module path is `github.com/rewulff/ember-crowdsec`. `go install github.com/rewulff/ember-crowdsec/cmd/ember-custom@latest` builds the custom Ember binary in one step — no clone, no token, no `GOPRIVATE` needed.
+The module path is `github.com/rewulff/ember-crowdsec`. `go install github.com/rewulff/ember-crowdsec/cmd/ember-custom@v0.1.0` builds the custom Ember binary in one step — no clone, no token, no `GOPRIVATE` needed.
 
 ## Out of scope (MVP)
 
