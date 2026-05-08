@@ -698,9 +698,15 @@ func TestRenderer_UnbanFlow(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 9: Renderer whitelist flow with duration input
+// Test 9: Renderer whitelist flow with stepped duration ladder
 // ---------------------------------------------------------------------------
 
+// v0.1.0 (stock Ember v1.3.0) uses a stepped duration ladder instead of a
+// free-form text buffer — Ember's tab-switch hotkey reserves digits 1..9
+// globally and never forwards them to a plugin's modal, so typing "1h"
+// into a buffer is unreachable in this architecture. The ladder spans
+// 30m / 1h / 4h / 12h / 24h / 7d with default at index 4 ("24h").
+// Sequence here: w → ↓ → ↓ → ↓ → enter → y, which lands on durationSteps[1] = "1h".
 func TestRenderer_WhitelistFlow(t *testing.T) {
 	t.Parallel()
 
@@ -708,14 +714,12 @@ func TestRenderer_WhitelistFlow(t *testing.T) {
 	p := provisionPlugin(t, m)
 	_ = fetchAndUpdate(t, p)
 
-	// w → backspace*3 → "1h" → enter → y
+	// w opens the ladder at index 4 ("24h"). Three downs land on index 1 ("1h").
 	keys := []tea.KeyMsg{
 		{Type: tea.KeyRunes, Runes: []rune{'w'}},
-		{Type: tea.KeyBackspace}, // erase "h"
-		{Type: tea.KeyBackspace}, // erase "4"
-		{Type: tea.KeyBackspace}, // erase "2"
-		{Type: tea.KeyRunes, Runes: []rune{'1'}},
-		{Type: tea.KeyRunes, Runes: []rune{'h'}},
+		{Type: tea.KeyDown},
+		{Type: tea.KeyDown},
+		{Type: tea.KeyDown},
 		{Type: tea.KeyEnter},
 		{Type: tea.KeyRunes, Runes: []rune{'y'}},
 	}
@@ -739,6 +743,74 @@ func TestRenderer_WhitelistFlow(t *testing.T) {
 	entries := auditLines(t, p)
 	if len(entries) != 1 || entries[0].Action != "whitelist" || entries[0].Duration != "1h" {
 		t.Errorf("audit = %+v, want whitelist/1h", entries)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 9b: Duration ladder navigation clamps at both ends
+// ---------------------------------------------------------------------------
+
+// Six up-arrows from the default index 4 ("24h") must clamp at len-1 = 5
+// ("7d"); six down-arrows from there must clamp at 0 ("30m"). Verifies
+// the bounds-guards in handleInputDuration so an over-eager operator
+// can't drive the index out of range.
+func TestRenderer_DurationStepsCycle(t *testing.T) {
+	t.Parallel()
+
+	m := newMockLAPI(t)
+	p := provisionPlugin(t, m)
+	_ = fetchAndUpdate(t, p)
+
+	// Open the ladder; default index 4 = "24h".
+	if !p.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}}) {
+		t.Fatal("HandleKey('w') returned false")
+	}
+	p.render.mu.RLock()
+	if got := p.render.durationStepIdx; got != defaultDurationStepIdx {
+		p.render.mu.RUnlock()
+		t.Fatalf("initial durationStepIdx = %d, want %d", got, defaultDurationStepIdx)
+	}
+	p.render.mu.RUnlock()
+
+	// Six ups from index 4 → index 5 (last), then clamp.
+	for i := 0; i < 6; i++ {
+		if !p.HandleKey(tea.KeyMsg{Type: tea.KeyUp}) {
+			t.Fatalf("HandleKey(up) #%d returned false", i)
+		}
+	}
+	p.render.mu.RLock()
+	upIdx := p.render.durationStepIdx
+	p.render.mu.RUnlock()
+	if upIdx != len(durationSteps)-1 {
+		t.Errorf("after 6× up durationStepIdx = %d, want %d (clamp)", upIdx, len(durationSteps)-1)
+	}
+
+	// Now 12 downs → clamp at 0.
+	for i := 0; i < 12; i++ {
+		if !p.HandleKey(tea.KeyMsg{Type: tea.KeyDown}) {
+			t.Fatalf("HandleKey(down) #%d returned false", i)
+		}
+	}
+	p.render.mu.RLock()
+	downIdx := p.render.durationStepIdx
+	p.render.mu.RUnlock()
+	if downIdx != 0 {
+		t.Errorf("after 12× down durationStepIdx = %d, want 0 (clamp)", downIdx)
+	}
+
+	// Confirm with Enter — durationBuf should now be "30m" (index 0).
+	if !p.HandleKey(tea.KeyMsg{Type: tea.KeyEnter}) {
+		t.Fatal("HandleKey(enter) returned false")
+	}
+	p.render.mu.RLock()
+	buf := p.render.durationBuf
+	mode := p.render.mode
+	p.render.mu.RUnlock()
+	if buf != "30m" {
+		t.Errorf("durationBuf after Enter = %q, want %q", buf, "30m")
+	}
+	if mode != modeConfirmWhitelist {
+		t.Errorf("mode after Enter = %v, want modeConfirmWhitelist", mode)
 	}
 }
 
@@ -956,14 +1028,16 @@ func TestRenderer_AllowUnbanLocal(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 15: FooterText returns the hotkey hint in normal mode
+// Test 15: Inline help footer is rendered in View() during modeNormal
 // ---------------------------------------------------------------------------
 
-// The plugin used to paint its own footer inline at the bottom of View().
-// Iteration 9 moved the footer to Ember's FooterRenderer hook so the hint
-// shares the global footer line. This test locks in that
-// CrowdSecPlugin.FooterText(width) returns the helpFooterText constant in
-// normal mode after a regular fetch + render.
+// v0.1.0 (stock Ember v1.3.0) has no FooterRenderer interface, so the
+// plugin paints the hotkey hint inline at the bottom of its tab body.
+// FooterText() stays as a forward-compat method (no-op without an
+// interface to bind it to in stock Ember) and still returns the same
+// hint, so the v0.2.0 migration is seamless. This test locks in both:
+// View() must contain helpFooterText in modeNormal, AND FooterText(80)
+// returns the same string for the future-Ember case.
 func TestRenderer_HelpFooterVisible(t *testing.T) {
 	t.Parallel()
 
@@ -971,21 +1045,54 @@ func TestRenderer_HelpFooterVisible(t *testing.T) {
 	p := provisionPlugin(t, m)
 	_ = fetchAndUpdate(t, p)
 
-	got := p.FooterText(80)
-	if got != helpFooterText {
-		t.Errorf("FooterText(80) = %q, want %q", got, helpFooterText)
+	view := p.View(80, 24)
+	if !strings.Contains(view, helpFooterText) {
+		t.Errorf("View() missing inline helpFooterText\nwant substring: %q\nview:\n%s",
+			helpFooterText, view)
 	}
 	// Belt-and-braces: the user-facing hotkey label should be there too,
 	// independent of the const symbol — protects against accidental const
 	// edits that would still match the test against itself.
-	if !strings.Contains(got, "toggle CAPI") {
-		t.Errorf("FooterText missing 'toggle CAPI' hint, got %q", got)
+	if !strings.Contains(view, "toggle CAPI") {
+		t.Errorf("View() missing 'toggle CAPI' hint")
 	}
-	// And the inline-footer must NOT appear in View() any more — the
-	// render path should be footer-free now that the global hook owns it.
+	// Forward-compat FooterText() also returns the hint (used by v0.2.0
+	// once Ember exposes the FooterRenderer interface).
+	if got := p.FooterText(80); got != helpFooterText {
+		t.Errorf("FooterText(80) = %q, want %q", got, helpFooterText)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 15b: Inline help footer is hidden during confirm/input modes
+// ---------------------------------------------------------------------------
+
+// While a confirm/input dialog is open the ladder ("[y/N]" / "←/→ select")
+// carries its own hotkey prompt — duplicating helpFooterText would be
+// visual noise. View() must therefore omit the inline footer in any
+// non-normal mode.
+func TestRenderer_HelpFooterHiddenInConfirmInline(t *testing.T) {
+	t.Parallel()
+
+	m := newMockLAPI(t)
+	p := provisionPlugin(t, m)
+	_ = fetchAndUpdate(t, p)
+
+	// Press 'd' on first decision (top of list, crowdsec origin) to enter
+	// modeConfirmUnban.
+	if !p.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}}) {
+		t.Fatal("HandleKey('d') returned false")
+	}
+	p.render.mu.RLock()
+	mode := p.render.mode
+	p.render.mu.RUnlock()
+	if mode != modeConfirmUnban {
+		t.Fatalf("mode = %v, want modeConfirmUnban", mode)
+	}
+
 	view := p.View(80, 24)
 	if strings.Contains(view, helpFooterText) {
-		t.Errorf("View() still renders helpFooterText inline; should be empty\nview:\n%s", view)
+		t.Errorf("View() still rendered inline helpFooterText during confirm mode\nview:\n%s", view)
 	}
 }
 
