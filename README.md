@@ -186,6 +186,23 @@ Each unban / whitelist attempt is journalled — successes **and** failures — 
 
 If the audit-log file cannot be opened or written, the plugin keeps running but the renderer surfaces `audit log write failed: ...` in its status line so you notice. The journal touches privileged actions — keep the file on a restrictive filesystem and don't sync it off-host without redaction.
 
+## Bouncer compatibility — whitelist hotkey
+
+The `w` (whitelist) hotkey creates a CrowdSec decision with `type: whitelist`. **This requires a bouncer that respects whitelist semantics.**
+
+### Known incompatibility: `hslatman/caddy-crowdsec-bouncer`
+
+This popular Caddy bouncer is implemented as a **block-list only** — every decision (regardless of type) is treated as a 403 block. A whitelist decision created via `w` will therefore **block the IP instead of allowing it**, and the resulting 403 salvo can trigger a `LePresidente/http-generic-403-bf` self-ban loop on the very same host that issued the whitelist.
+
+Symptoms when this happens:
+- Caddy access log shows `WARN got crowdsec decision type: whitelist` immediately followed by `status: 403`
+- The whitelisted IP is invisible in `cscli decisions list` (default view filters to `ban`)
+- A new ban for the same IP appears within seconds, scenario `LePresidente/http-generic-403-bf`
+
+**Workaround** until plugin behavior changes: use Engine-Whitelists via `/etc/crowdsec/postoverflows/s01-whitelist/<name>.yaml` instead of Decision-Whitelists. The TUI's `w` hotkey is safe with bouncers that distinguish decision types (CrowdSec official bouncers, nginx, traefik, HAProxy).
+
+Upstream tracker: [hslatman/caddy-crowdsec-bouncer](https://github.com/hslatman/caddy-crowdsec-bouncer/issues) — check whether a doc clarification or feature request is open before using `w` against a Caddy host.
+
 ## Caveat
 
 LAPI is only reachable from `localhost` on the CrowdSec host by default. This plugin is therefore designed to **run on the same host as the CrowdSec agent** (typically the same LXC that serves Caddy). Cross-host LAPI access requires opening the LAPI port + extra TLS hardening — explicitly out of scope for the MVP.
