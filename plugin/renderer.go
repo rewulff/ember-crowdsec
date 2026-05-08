@@ -28,6 +28,18 @@ const (
 // state on screen indefinitely.
 const statusFadeAfter = 5 * time.Second
 
+// Layout sizing for the height-aware split between Decisions and Alerts.
+// Iter-14 lesson: at 20+20 hardcoded Top-N the tab sprengt the container
+// on typical 24-30 row terminals. View() now divides the available height
+// roughly 50/50 between the two sections, but never below sectionMinRows
+// (so a single decision is still visible) and never above sectionMaxRows
+// (so a 60-row terminal doesn't pull >20 rows that the underlying lists
+// won't fill anyway).
+const (
+	sectionMinRows = 5
+	sectionMaxRows = 20
+)
+
 // helpFooterText is the inline hotkey hint rendered at the bottom of the
 // plugin tab. Ember's global help-overlay (?) only surfaces plugin
 // HelpBindings on core tabs, not on the plugin's own tab — so the plugin
@@ -192,14 +204,23 @@ func (r *renderer) view(width, height int) string {
 		b.WriteString("\n\n")
 	}
 
-	b.WriteString(r.titleStyle.Render("Decisions (top 20 by remaining TTL)"))
+	// Compute per-section row caps from the available height. The plugin
+	// renders two stacked tables (Decisions + Alerts), each with its own
+	// title line and bottom-bordered header row, plus a header at the very
+	// top, optional error/dialog/status lines, and trailing spacers. We
+	// reserve a fixed line budget for that chrome and split the rest
+	// roughly 50/50 between the two table bodies. See sectionMinRows /
+	// sectionMaxRows for the safety floors and ceilings.
+	decisionsCap, alertsCap := computeSectionCaps(height, r.snap.Err != nil)
+
+	b.WriteString(r.titleStyle.Render(fmt.Sprintf("Decisions (top %d by remaining TTL)", decisionsCap)))
 	b.WriteString("\n")
-	b.WriteString(r.renderDecisions(20, width))
+	b.WriteString(r.renderDecisions(decisionsCap, width))
 	b.WriteString("\n")
 
 	b.WriteString(r.titleStyle.Render("Recent alerts"))
 	b.WriteString("\n")
-	b.WriteString(r.renderAlerts(20, width))
+	b.WriteString(r.renderAlerts(alertsCap, width))
 
 	if dialog := r.renderDialog(); dialog != "" {
 		b.WriteString("\n")
@@ -628,6 +649,57 @@ func (r *renderer) surfaceAuditError() {
 }
 
 // --- helpers ---------------------------------------------------------------
+
+// computeSectionCaps splits the available terminal height between the
+// Decisions and Alerts tables. The chrome budget covers:
+//   - 1  header line ("CrowdSec — N decisions, ...")
+//   - 1  "Decisions (top N by remaining TTL)" title
+//   - 1  decisions table-header row (lipgloss adds the bottom-border ON the
+//        same line — bottom-border counts as a separate visual line, hence +1)
+//   - 1  decisions header bottom-border
+//   - 1  "... N more" footer (allocate even if not always rendered, cheap
+//        margin against off-by-one)
+//   - 1  blank line between sections
+//   - 1  "Recent alerts" title
+//   - 1  alerts table-header row
+//   - 1  alerts header bottom-border
+//   - 1  alerts "... N more" footer (same margin)
+//   - 2  status / dialog reserve (non-rendered most of the time, but the
+//        layout must accommodate them when they pop up so the user doesn't
+//        see a sudden clip)
+//   - 2  trailing spacer newlines (keep tab parity with core tabs, see
+//        renderer.go view() comment about iter-9 spacer reservation)
+//   - +2 if an error banner is rendered ("Error: ..." + blank line)
+//
+// = 13 lines of chrome (15 with error). Anything left is split evenly,
+// then clamped to [sectionMinRows, sectionMaxRows] per section.
+func computeSectionCaps(height int, hasError bool) (decisionsCap, alertsCap int) {
+	chrome := 13
+	if hasError {
+		chrome += 2
+	}
+	available := height - chrome
+	if available < sectionMinRows*2 {
+		// Tiny terminal — give each section the floor and let the renderer's
+		// own "... N more" overflow do its job. Better clipped than zero.
+		return sectionMinRows, sectionMinRows
+	}
+	decisionsCap = available / 2
+	alertsCap = available - decisionsCap
+	if decisionsCap < sectionMinRows {
+		decisionsCap = sectionMinRows
+	}
+	if alertsCap < sectionMinRows {
+		alertsCap = sectionMinRows
+	}
+	if decisionsCap > sectionMaxRows {
+		decisionsCap = sectionMaxRows
+	}
+	if alertsCap > sectionMaxRows {
+		alertsCap = sectionMaxRows
+	}
+	return decisionsCap, alertsCap
+}
 
 func truncate(s string, n int) string {
 	if len(s) <= n {

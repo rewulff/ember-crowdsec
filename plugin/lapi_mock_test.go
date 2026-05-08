@@ -1034,3 +1034,80 @@ func TestRenderer_HelpFooterPreProvision(t *testing.T) {
 		t.Errorf("FooterText on un-provisioned plugin = %q, want empty", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Test 18: computeSectionCaps splits height roughly 50/50 with floors/ceilings
+// ---------------------------------------------------------------------------
+
+// Iter-14 layout invariant: caps clamp into [sectionMinRows, sectionMaxRows]
+// regardless of input height, the sum tracks (height - chrome) inside the
+// linear band, and the error-banner budget reduces caps further.
+func TestComputeSectionCaps_Bands(t *testing.T) {
+	t.Parallel()
+
+	// At a typical 24-row terminal the chrome budget (13 lines) leaves 11
+	// rows: 5/6 split, both at or near the floor.
+	d, a := computeSectionCaps(24, false)
+	if d+a != 11 || d < sectionMinRows || a < sectionMinRows {
+		t.Errorf("computeSectionCaps(24,false) = (%d,%d), want sum 11 with both >= %d", d, a, sectionMinRows)
+	}
+
+	// At 30 rows: 30-13 = 17 → 8/9 split, both within band.
+	d, a = computeSectionCaps(30, false)
+	if d+a != 17 || d < sectionMinRows || a < sectionMinRows || d > sectionMaxRows || a > sectionMaxRows {
+		t.Errorf("computeSectionCaps(30,false) = (%d,%d), want sum 17 within band", d, a)
+	}
+
+	// At a huge 80-row terminal both sections must clamp at the ceiling
+	// sectionMaxRows=20 (the underlying lists never carry more than that
+	// in realistic CrowdSec deployments anyway).
+	d, a = computeSectionCaps(80, false)
+	if d != sectionMaxRows || a != sectionMaxRows {
+		t.Errorf("computeSectionCaps(80,false) = (%d,%d), want (%d,%d)", d, a, sectionMaxRows, sectionMaxRows)
+	}
+
+	// Tiny terminal: 10 rows → both clamp to floor, no negative caps.
+	d, a = computeSectionCaps(10, false)
+	if d != sectionMinRows || a != sectionMinRows {
+		t.Errorf("computeSectionCaps(10,false) = (%d,%d), want (%d,%d)", d, a, sectionMinRows, sectionMinRows)
+	}
+
+	// Error banner steals 2 rows: at 30 rows the available drops from 17 to
+	// 15, which is still inside the linear band. Sum must equal 15.
+	d, a = computeSectionCaps(30, true)
+	if d+a != 15 {
+		t.Errorf("computeSectionCaps(30,true) = (%d,%d), want sum 15 (error banner reserves 2)", d, a)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 19: View output line count fits the requested terminal height
+// ---------------------------------------------------------------------------
+
+// Smoke test for the height-aware layout: at 30 rows the View output must
+// not exceed 30 lines (off-by-one tolerance for the trailing newline that
+// strings.Builder appends), and at 24 rows the layout must clip to the
+// floor (5/5 sections) without producing more rows than the chrome budget
+// allows.
+func TestRenderer_ViewFitsHeight(t *testing.T) {
+	t.Parallel()
+
+	m := newMockLAPI(t)
+	p := provisionPlugin(t, m)
+	_ = fetchAndUpdate(t, p)
+
+	for _, h := range []int{24, 30, 40, 80} {
+		view := p.View(120, h)
+		// Strip trailing newlines that strings.Builder appends — the relevant
+		// figure is "lines of content" not "trailing whitespace".
+		trimmed := strings.TrimRight(view, "\n")
+		got := strings.Count(trimmed, "\n") + 1
+		// Allow up to 2 extra lines of slack: lipgloss bottom-borders are
+		// rendered ON the header line in some terminals but as a separate
+		// line in others, plus the chrome budget rounds in our favour.
+		if got > h+2 {
+			t.Errorf("View(120,%d) produced %d lines (>= %d limit + slack=2)\n%s",
+				h, got, h, view)
+		}
+	}
+}
