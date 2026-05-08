@@ -6,7 +6,7 @@ CrowdSec Bouncer Tab plugin for [alexandre-daubois/ember](https://github.com/ale
 
 ## Status
 
-MVP. Pinned to `ember v1.3.0` because the plugin API is marked EXPERIMENTAL upstream.
+v0.1.0 — MVP. Pinned to `ember v1.3.0` because the plugin API is marked EXPERIMENTAL upstream. v0.2.0 (post upstream merge) lifts the v0.1.0 caveats listed below — see [`ROADMAP.md`](ROADMAP.md).
 
 ## Architecture
 
@@ -50,10 +50,10 @@ The output binary is a full Ember TUI with the CrowdSec plugin compiled in (Go's
 Or, in one step without a manual clone:
 
 ```sh
-go install github.com/rewulff/ember-crowdsec/cmd/ember-custom@latest
+go install github.com/rewulff/ember-crowdsec/cmd/ember-custom@v0.1.0
 ```
 
-The binary lands in `$(go env GOBIN)` (or `$(go env GOPATH)/bin` if `GOBIN` is unset).
+The binary lands in `$(go env GOBIN)` (or `$(go env GOPATH)/bin` if `GOBIN` is unset). v0.2.0 (post upstream merge) will lift the v0.1.0 caveats listed under "Killer feature" below — see [`ROADMAP.md`](ROADMAP.md) for the migration path.
 
 ### 3. Run with environment configuration
 
@@ -133,13 +133,21 @@ The CrowdSec tab is interactive:
 | `↑/↓` (or `j/k`) | normal | Move the decision cursor |
 | `c` | normal | Toggle CAPI inclusion (see "Origin filter" below) |
 | `d` | normal | Confirm-unban prompt — **only on `crowdsec` / `cscli` decisions** |
-| `w` | normal | Whitelist input flow (duration default `24h`); allowed on all origins |
+| `w` | normal | Whitelist flow — opens stepped duration ladder (`30m / 1h / 4h / 12h / 24h / 7d`, default `24h`); allowed on all origins |
+| `↑/↓` (or `←/→`, `j/k`, `h/l`) | input-duration | Navigate the duration ladder |
+| `Enter` | input-duration | Confirm the selected step, advance to confirm-whitelist |
 | `y / Y` | confirm-unban / confirm-whitelist | Run the action |
 | `n / N / Esc` | any confirm | Cancel |
-| `Enter` | input-duration | Advance to confirm-whitelist |
-| printable + `Backspace` | input-duration | Edit the duration buffer |
 
 Every confirm dialog shows the IP, origin and scenario inline so accidental hits are unlikely. While in any non-normal mode the plugin **consumes every keystroke** so that other tabs/global shortcuts don't fire mid-flow.
+
+### Caveats with stock Ember v1.3.0
+
+These three limitations are imposed by the stock Ember plugin API and not by this plugin. All are addressed in upstream PRs and lifted in v0.2.0 — full table with PR links in [`ROADMAP.md`](ROADMAP.md).
+
+- **Whitelist duration is stepped, not free-form.** Ember's tab-switch hotkey reserves digits `1..9` globally; the plugin never sees a digit keypress while a modal is open. v0.2.0 (after upstream digit-forward PR) restores free-form input like `48h`.
+- **Hotkey hints render inline in the tab body**, not on Ember's global footer. v0.2.0 (after upstream `FooterRenderer` interface PR) moves them to the footer line and gives the row back to content.
+- **No direct tab addressing from inside a modal.** Use `Tab` / `Shift+Tab` to cycle, or `Esc` then digit to jump. v0.2.0 adds a `t`-prefix tab-select mode that works from any state.
 
 ### Origin filter (default = your decisions only)
 
