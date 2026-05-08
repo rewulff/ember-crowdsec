@@ -184,6 +184,14 @@ func (r *renderer) view(width, height int) string {
 	// here. The plugin's struct method delegates to footerText() which
 	// reads the same r.mode gating.
 
+	// Trailing spacer lines stabilise the tab's vertical extent for
+	// Ember's tab-layout engine. After iter-9 removed the inline help
+	// footer, this tab produced ~2 lines fewer than the dense core tabs
+	// (Caddy, Logs, ...) and Ember subtly re-scaled the content, making
+	// it look "minimal kleiner" than the others. Two reserved newlines
+	// here restore parity without re-introducing footer text.
+	b.WriteString("\n\n")
+
 	return b.String()
 }
 
