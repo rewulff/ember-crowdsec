@@ -218,11 +218,15 @@ func (r *renderer) renderDecisions(limit int) string {
 		origin := truncate(d.Origin, 12)
 		scenario := truncate(d.Scenario, 30)
 		// Prefix swap keeps both selected and non-selected lines exactly
-		// the same width so the column grid stays aligned. "▸ " is the
-		// active marker, "  " (two spaces) is the inactive indent.
+		// the same width so the column grid stays aligned. "> " is the
+		// active marker, "  " (two spaces) is the inactive indent. ASCII
+		// greater-than is used (instead of U+25B8 "▸") because xtermjs in
+		// the Proxmox web VNC renders some Unicode arrow glyphs at a
+		// non-cell-aligned width, which shifted the selected row up and
+		// to the side relative to the rest of the table (iter-10 fix).
 		prefix := "  "
 		if i == r.selectedIdx {
-			prefix = "▸ "
+			prefix = "> "
 		}
 		line := fmt.Sprintf("%s%-19s %-12s %-30s %s", prefix, val, origin, scenario, ttl)
 		if i == r.selectedIdx {
