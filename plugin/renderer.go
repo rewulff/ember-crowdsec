@@ -80,7 +80,15 @@ func newRenderer(actions *actionsClient, audit *auditLog, fetch *fetcher) *rende
 		sectionStyle:  lipgloss.NewStyle().Bold(true).Underline(true),
 		errorStyle:    lipgloss.NewStyle().Foreground(lipgloss.Color("9")),
 		dimStyle:      lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
-		selectedStyle: lipgloss.NewStyle().Reverse(true),
+		// Cursor-marker style instead of Reverse: lipgloss.Reverse on the
+		// whole line eats the leading whitespace indent and shifts the
+		// selected row visually leftwards (Issue #3). Bold + accent colour
+		// keeps the selection obvious without changing the row's geometry,
+		// and the "▸ " cursor marker (replacing the two-space indent of
+		// non-selected rows) gives an unambiguous visual cue for the
+		// active line. Reuses the same accent shade as headerStyle for
+		// stylistic coherence.
+		selectedStyle: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12")),
 		dialogStyle: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("11")).
@@ -207,7 +215,14 @@ func (r *renderer) renderDecisions(limit int) string {
 		val := truncate(d.Value, 19)
 		origin := truncate(d.Origin, 12)
 		scenario := truncate(d.Scenario, 30)
-		line := fmt.Sprintf("  %-19s %-12s %-30s %s", val, origin, scenario, ttl)
+		// Prefix swap keeps both selected and non-selected lines exactly
+		// the same width so the column grid stays aligned. "▸ " is the
+		// active marker, "  " (two spaces) is the inactive indent.
+		prefix := "  "
+		if i == r.selectedIdx {
+			prefix = "▸ "
+		}
+		line := fmt.Sprintf("%s%-19s %-12s %-30s %s", prefix, val, origin, scenario, ttl)
 		if i == r.selectedIdx {
 			b.WriteString(r.selectedStyle.Render(line))
 		} else {
