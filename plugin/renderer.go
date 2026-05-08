@@ -61,37 +61,71 @@ type renderer struct {
 	statusLine      string
 	statusAt        time.Time
 
-	headerStyle  lipgloss.Style
-	sectionStyle lipgloss.Style
-	errorStyle   lipgloss.Style
-	dimStyle     lipgloss.Style
-	dialogStyle  lipgloss.Style
-	statusStyle  lipgloss.Style
+	titleStyle       lipgloss.Style
+	tableHeaderStyle lipgloss.Style
+	selectedRowStyle lipgloss.Style
+	greyStyle        lipgloss.Style
+	dangerStyle      lipgloss.Style
+	dialogStyle      lipgloss.Style
+	okStyle          lipgloss.Style
 }
+
+// Theme constants mirror ember-fork/internal/ui/styles.go (Bold + ember
+// AdaptiveColor for titles, subtle for muted/header rows, Reverse() for
+// selected rows, RoundedBorder + ember for popups). Replicated locally
+// because internal/ui is not importable from third-party plugin code.
+// Keep in lock-step with upstream styles.go to honour the maintainer's
+// design language.
+var (
+	emberSubtle = lipgloss.AdaptiveColor{Light: "#7A6652", Dark: "#A0896E"}
+	emberAccent = lipgloss.AdaptiveColor{Light: "#CC4400", Dark: "#FF6B35"}
+	emberRed    = lipgloss.AdaptiveColor{Light: "#CC0000", Dark: "#FF4444"}
+	emberGreen  = lipgloss.AdaptiveColor{Light: "#228B22", Dark: "#44CC44"}
+)
 
 func newRenderer(actions *actionsClient, audit *auditLog, fetch *fetcher) *renderer {
 	return &renderer{
-		actions:       actions,
-		audit:         audit,
-		fetch:         fetch,
-		durationBuf:   "24h",
-		headerStyle:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12")),
-		sectionStyle: lipgloss.NewStyle().Bold(true).Underline(true),
-		errorStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("9")),
-		dimStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
-		// Selected line uses no lipgloss style at all — the ASCII "> "
-		// prefix is the only marker. iter-10 still wrapped the selected
-		// row with Foreground(Color("12")) which inserts ANSI sequences
-		// (\x1b[38;5;12m...\x1b[0m). xtermjs in the Proxmox web VNC
-		// rendered the row at a horizontally shifted position despite the
-		// padded width matching, so we drop the wrapper entirely. A pure
-		// ASCII prefix-swap keeps the selected line byte-identical to the
-		// surrounding lines apart from the marker.
+		actions:     actions,
+		audit:       audit,
+		fetch:       fetch,
+		durationBuf: "24h",
+		// titleStyle = Embers titleStyle: Bold + ember-accent. Used for
+		// the tab header line and the section labels ("Decisions ...",
+		// "Recent alerts"). Mirrors styles.go:11-13.
+		titleStyle: lipgloss.NewStyle().Bold(true).Foreground(emberAccent),
+		// tableHeaderStyle = Embers tableHeaderStyle: Bold + subtle FG +
+		// bottom-border in subtle. Applied to the column-header row of
+		// the Decisions and Alerts tables so the look matches Caddy /
+		// Certs / Upstreams. Mirrors styles.go:20-25.
+		tableHeaderStyle: lipgloss.NewStyle().
+			Bold(true).
+			Foreground(emberSubtle).
+			BorderBottom(true).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(emberSubtle),
+		// selectedRowStyle = Embers selectedRowStyle: Reverse(true).
+		// Width is set per-render-call (see renderDecisions) so the
+		// row inverts the FULL line, not just the visible content.
+		// Render-arg never contains a "\n" (newline-discipline lesson
+		// from iter-10..12: lipgloss inserts ANSI resets relative to
+		// embedded newlines, and xtermjs in Proxmox web VNC then
+		// renders the next line shifted). Mirrors styles.go:27-28.
+		selectedRowStyle: lipgloss.NewStyle().Reverse(true),
+		// greyStyle = Embers greyStyle: subtle FG. For "(none)" hints
+		// and "... N more" overflow lines. Mirrors styles.go:32.
+		greyStyle: lipgloss.NewStyle().Foreground(emberSubtle),
+		// dangerStyle = Embers dangerStyle: Bold + red FG. For error
+		// banners. Mirrors styles.go:34.
+		dangerStyle: lipgloss.NewStyle().Bold(true).Foreground(emberRed),
+		// dialogStyle = Embers boxStyle: RoundedBorder + ember-accent
+		// border. Used for confirm/input overlays. Mirrors styles.go:15-18.
 		dialogStyle: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("11")).
+			BorderForeground(emberAccent).
 			Padding(0, 1),
-		statusStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("10")),
+		// okStyle = Embers okStyle: green FG. Used for status-line
+		// success messages. Mirrors styles.go:40-41.
+		okStyle: lipgloss.NewStyle().Foreground(emberGreen),
 	}
 }
 
@@ -128,7 +162,7 @@ func (r *renderer) view(width, height int) string {
 	var b strings.Builder
 
 	if !r.hasData {
-		b.WriteString(r.headerStyle.Render("CrowdSec — waiting for first fetch..."))
+		b.WriteString(r.titleStyle.Render("CrowdSec — waiting for first fetch..."))
 		b.WriteString("\n")
 		return b.String()
 	}
@@ -147,22 +181,25 @@ func (r *renderer) view(width, height int) string {
 		r.snap.FetchedAt.Local().Format("15:04:05"),
 		filterHint,
 	)
-	b.WriteString(r.headerStyle.Render(hdr))
+	// Title-line gets Embers Bold+ember-accent treatment. Render-arg holds
+	// no embedded newline; the "\n" is appended via WriteString so lipgloss
+	// can't insert reset sequences mid-line (iter-10..12 lesson).
+	b.WriteString(r.titleStyle.Render(hdr))
 	b.WriteString("\n")
 
 	if r.snap.Err != nil {
-		b.WriteString(r.errorStyle.Render("Error: " + r.snap.Err.Error()))
+		b.WriteString(r.dangerStyle.Render("Error: " + r.snap.Err.Error()))
 		b.WriteString("\n\n")
 	}
 
-	b.WriteString(r.sectionStyle.Render("Decisions (top 20 by remaining TTL)"))
+	b.WriteString(r.titleStyle.Render("Decisions (top 20 by remaining TTL)"))
 	b.WriteString("\n")
-	b.WriteString(r.renderDecisions(20))
+	b.WriteString(r.renderDecisions(20, width))
 	b.WriteString("\n")
 
-	b.WriteString(r.sectionStyle.Render("Recent alerts"))
+	b.WriteString(r.titleStyle.Render("Recent alerts"))
 	b.WriteString("\n")
-	b.WriteString(r.renderAlerts(20))
+	b.WriteString(r.renderAlerts(20, width))
 
 	if dialog := r.renderDialog(); dialog != "" {
 		b.WriteString("\n")
@@ -205,23 +242,22 @@ func (r *renderer) footerText() string {
 	return helpFooterText
 }
 
-func (r *renderer) renderDecisions(limit int) string {
+func (r *renderer) renderDecisions(limit, width int) string {
 	if len(r.snap.Decisions) == 0 {
-		return r.dimStyle.Render("  (none)") + "\n"
+		b := r.greyStyle.Render("  (none)")
+		return b + "\n"
 	}
 	var b strings.Builder
-	// iter-12: header is pure ASCII, NOT wrapped in r.dimStyle.Render(...).
-	// Lipgloss Render() expects a string with no embedded newlines: when the
-	// arg contains "\n", lipgloss inserts ANSI style + reset sequences
-	// relative to that newline, which xtermjs (Proxmox web VNC) interprets
-	// as "cursor stays on the same line" — the next data line (= the
-	// selected first decision) then renders ON TOP of the header. Iter-11
-	// already removed the lipgloss wrap from the selected row; the visual
-	// overlap persisted, so the dimStyle-wrapped header (which has the
-	// embedded \n) is the next suspect. Phase-1 diagnosis: drop the
-	// dimStyle here. If this fixes the overlap, hypothesis confirmed.
-	header := fmt.Sprintf("  %-19s %-12s %-30s %s\n", "VALUE", "ORIGIN", "SCENARIO", "TTL-REM")
-	b.WriteString(header)
+	// Header mirrors Embers tableHeaderStyle pattern (Bold + subtle FG +
+	// bottom-border): see ember-fork upstreamtable.go:60 / certificates.go:57.
+	// Render-arg has NO embedded newline — the "\n" is added separately via
+	// WriteString. iter-10..12 lesson: lipgloss inserts ANSI sequences
+	// relative to embedded newlines, xtermjs in Proxmox web VNC then
+	// renders the next visual line shifted/overlapping. Width(width) makes
+	// the bottom-border span the full tab width like the core tabs.
+	header := fmt.Sprintf(" %-19s %-12s %-30s %s", "VALUE", "ORIGIN", "SCENARIO", "TTL-REM")
+	b.WriteString(r.tableHeaderStyle.Width(width).Render(header))
+	b.WriteString("\n")
 
 	n := len(r.snap.Decisions)
 	if n > limit {
@@ -233,41 +269,44 @@ func (r *renderer) renderDecisions(limit int) string {
 		val := truncate(d.Value, 19)
 		origin := truncate(d.Origin, 12)
 		scenario := truncate(d.Scenario, 30)
-		// Prefix swap keeps both selected and non-selected lines exactly
-		// the same width so the column grid stays aligned. "> " is the
-		// active marker, "  " (two spaces) is the inactive indent. ASCII
-		// greater-than is used (instead of U+25B8 "▸") because xtermjs in
-		// the Proxmox web VNC renders some Unicode arrow glyphs at a
-		// non-cell-aligned width, which shifted the selected row up and
-		// to the side relative to the rest of the table (iter-10 fix).
-		// iter-11 dropped the lipgloss Foreground wrap for the selected
-		// row because the inserted ANSI escape sequences confused
-		// xtermjs's render-diff and the row ended up overlapping the
-		// header. Both branches now write a plain string.
-		prefix := "  "
+		// Embers prefix convention (upstreamtable.go:166-168, certificates.go:116-119):
+		// prefix is a single character — " " for unselected, ">" for selected.
+		// One space gap to the value follows from the format string itself.
+		prefix := " "
 		if i == r.selectedIdx {
-			prefix = "> "
+			prefix = ">"
 		}
 		line := fmt.Sprintf("%s%-19s %-12s %-30s %s", prefix, val, origin, scenario, ttl)
-		b.WriteString(line)
+		if i == r.selectedIdx {
+			// selectedRowStyle = Reverse(true). Width(width) extends the
+			// inversion to the full tab width so the highlight reaches the
+			// right edge (Embers pattern: certificates.go:130, etc.).
+			// Render-arg has NO "\n" — the trailing newline is appended via
+			// WriteString below.
+			b.WriteString(r.selectedRowStyle.Width(width).Render(line))
+		} else {
+			b.WriteString(line)
+		}
 		b.WriteString("\n")
 	}
 	if len(r.snap.Decisions) > limit {
-		// iter-12: pure ASCII (see header rationale above), embedded \n in
-		// dimStyle.Render arg is the suspected xtermjs render-glitch trigger.
-		b.WriteString(fmt.Sprintf("  ... %d more\n", len(r.snap.Decisions)-limit))
+		more := fmt.Sprintf("  ... %d more", len(r.snap.Decisions)-limit)
+		b.WriteString(r.greyStyle.Render(more))
+		b.WriteString("\n")
 	}
 	return b.String()
 }
 
-func (r *renderer) renderAlerts(limit int) string {
+func (r *renderer) renderAlerts(limit, width int) string {
 	if len(r.snap.Alerts) == 0 {
-		return r.dimStyle.Render("  (none)") + "\n"
+		return r.greyStyle.Render("  (none)") + "\n"
 	}
 	var b strings.Builder
-	// iter-12: pure ASCII header, see renderDecisions rationale.
-	header := fmt.Sprintf("  %-7s %-30s %-19s %s\n", "ID", "SCENARIO", "SOURCE", "CREATED")
-	b.WriteString(header)
+	// Same tableHeaderStyle treatment as renderDecisions; render-arg has
+	// no embedded newline (newline-discipline).
+	header := fmt.Sprintf(" %-7s %-30s %-19s %s", "ID", "SCENARIO", "SOURCE", "CREATED")
+	b.WriteString(r.tableHeaderStyle.Width(width).Render(header))
+	b.WriteString("\n")
 
 	n := len(r.snap.Alerts)
 	if n > limit {
@@ -280,16 +319,20 @@ func (r *renderer) renderAlerts(limit int) string {
 			src = a.Source.IP
 		}
 		created := truncateRFC3339(a.CreatedAt)
-		b.WriteString(fmt.Sprintf("  %-7d %-30s %-19s %s\n",
+		// Alerts list has no selection cursor (read-only), so all rows
+		// stay plain — matching Embers logtable.go non-selected branch.
+		b.WriteString(fmt.Sprintf(" %-7d %-30s %-19s %s",
 			a.ID,
 			truncate(a.Scenario, 30),
 			truncate(src, 19),
 			created,
 		))
+		b.WriteString("\n")
 	}
 	if len(r.snap.Alerts) > limit {
-		// iter-12: pure ASCII (see renderDecisions rationale).
-		b.WriteString(fmt.Sprintf("  ... %d more\n", len(r.snap.Alerts)-limit))
+		more := fmt.Sprintf("  ... %d more", len(r.snap.Alerts)-limit)
+		b.WriteString(r.greyStyle.Render(more))
+		b.WriteString("\n")
 	}
 	return b.String()
 }
@@ -329,9 +372,12 @@ func (r *renderer) renderStatus() string {
 	if time.Since(r.statusAt) > statusFadeAfter {
 		return ""
 	}
-	style := r.statusStyle
+	// okStyle = green for success, dangerStyle = bold-red for error.
+	// Status messages never contain a newline so Render-arg is single-line
+	// (newline-discipline).
+	style := r.okStyle
 	if strings.HasPrefix(r.statusLine, "error:") || strings.HasPrefix(r.statusLine, "audit log") {
-		style = r.errorStyle
+		style = r.dangerStyle
 	}
 	return style.Render(r.statusLine)
 }
