@@ -82,13 +82,14 @@ func newRenderer(actions *actionsClient, audit *auditLog, fetch *fetcher) *rende
 		dimStyle:      lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
 		// Cursor-marker style instead of Reverse: lipgloss.Reverse on the
 		// whole line eats the leading whitespace indent and shifts the
-		// selected row visually leftwards (Issue #3). Bold + accent colour
-		// keeps the selection obvious without changing the row's geometry,
-		// and the "▸ " cursor marker (replacing the two-space indent of
-		// non-selected rows) gives an unambiguous visual cue for the
-		// active line. Reuses the same accent shade as headerStyle for
-		// stylistic coherence.
-		selectedStyle: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12")),
+		// selected row visually leftwards (Issue #3). Foreground accent only
+		// — Bold was dropped in iter-10 because some terminal renderers
+		// (notably xtermjs in the Proxmox web VNC) reflow bold rows to a
+		// slightly different cell height, making the selected row appear
+		// one row higher than the rest. Plain accent colour + the ASCII
+		// "> " cursor marker gives an unambiguous selection cue while
+		// keeping every row's geometry pixel-identical.
+		selectedStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("12")),
 		dialogStyle: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("11")).
