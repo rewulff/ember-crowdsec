@@ -65,7 +65,6 @@ type renderer struct {
 	sectionStyle lipgloss.Style
 	errorStyle   lipgloss.Style
 	dimStyle     lipgloss.Style
-	selectedStyle lipgloss.Style
 	dialogStyle  lipgloss.Style
 	statusStyle  lipgloss.Style
 }
@@ -76,20 +75,18 @@ func newRenderer(actions *actionsClient, audit *auditLog, fetch *fetcher) *rende
 		audit:         audit,
 		fetch:         fetch,
 		durationBuf:   "24h",
-		headerStyle:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12")),
-		sectionStyle:  lipgloss.NewStyle().Bold(true).Underline(true),
-		errorStyle:    lipgloss.NewStyle().Foreground(lipgloss.Color("9")),
-		dimStyle:      lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
-		// Cursor-marker style instead of Reverse: lipgloss.Reverse on the
-		// whole line eats the leading whitespace indent and shifts the
-		// selected row visually leftwards (Issue #3). Foreground accent only
-		// — Bold was dropped in iter-10 because some terminal renderers
-		// (notably xtermjs in the Proxmox web VNC) reflow bold rows to a
-		// slightly different cell height, making the selected row appear
-		// one row higher than the rest. Plain accent colour + the ASCII
-		// "> " cursor marker gives an unambiguous selection cue while
-		// keeping every row's geometry pixel-identical.
-		selectedStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("12")),
+		headerStyle:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12")),
+		sectionStyle: lipgloss.NewStyle().Bold(true).Underline(true),
+		errorStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("9")),
+		dimStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
+		// Selected line uses no lipgloss style at all — the ASCII "> "
+		// prefix is the only marker. iter-10 still wrapped the selected
+		// row with Foreground(Color("12")) which inserts ANSI sequences
+		// (\x1b[38;5;12m...\x1b[0m). xtermjs in the Proxmox web VNC
+		// rendered the row at a horizontally shifted position despite the
+		// padded width matching, so we drop the wrapper entirely. A pure
+		// ASCII prefix-swap keeps the selected line byte-identical to the
+		// surrounding lines apart from the marker.
 		dialogStyle: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("11")).
@@ -233,16 +230,16 @@ func (r *renderer) renderDecisions(limit int) string {
 		// the Proxmox web VNC renders some Unicode arrow glyphs at a
 		// non-cell-aligned width, which shifted the selected row up and
 		// to the side relative to the rest of the table (iter-10 fix).
+		// iter-11 dropped the lipgloss Foreground wrap for the selected
+		// row because the inserted ANSI escape sequences confused
+		// xtermjs's render-diff and the row ended up overlapping the
+		// header. Both branches now write a plain string.
 		prefix := "  "
 		if i == r.selectedIdx {
 			prefix = "> "
 		}
 		line := fmt.Sprintf("%s%-19s %-12s %-30s %s", prefix, val, origin, scenario, ttl)
-		if i == r.selectedIdx {
-			b.WriteString(r.selectedStyle.Render(line))
-		} else {
-			b.WriteString(line)
-		}
+		b.WriteString(line)
 		b.WriteString("\n")
 	}
 	if len(r.snap.Decisions) > limit {
