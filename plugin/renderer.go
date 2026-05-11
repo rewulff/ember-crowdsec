@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -72,6 +73,18 @@ type renderer struct {
 	pendingDecision *Decision
 	statusLine      string
 	statusAt        time.Time
+
+	// scrollOffset is the absolute index in r.snap.Decisions at which the
+	// visible window begins. Stored atomically so view() (RLock) can apply
+	// resize-correction without lock upgrade, and handleNormal (WLock) can
+	// adjust it on cursor navigation without contending against view().
+	scrollOffset atomic.Int32
+
+	// lastDecisionsCap caches the most recent decisions limit computed by
+	// view() so handleNormal can decide when the cursor crossed the bottom
+	// of the visible window. Atomic for the same reason as scrollOffset:
+	// view() runs under RLock and must not be the only writer behind WLock.
+	lastDecisionsCap atomic.Int32
 
 	titleStyle       lipgloss.Style
 	tableHeaderStyle lipgloss.Style
@@ -143,7 +156,10 @@ func newRenderer(actions *actionsClient, audit *auditLog, fetch *fetcher) *rende
 
 // update stores the latest snapshot. Width/height are accepted but currently
 // unused (we render at full available width using padding-only layout).
-// Selection is clamped if the underlying decision list shrinks.
+// Selection is clamped if the underlying decision list shrinks; scrollOffset
+// is clamped against len(Decisions) but NOT re-centered to selectedIdx —
+// tick-poll refreshes with identical lists must not cause the window to jump
+// (would flicker the UI on every poll).
 func (r *renderer) update(data any, _, _ int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -155,6 +171,20 @@ func (r *renderer) update(data any, _, _ int) {
 		}
 		if r.selectedIdx < 0 {
 			r.selectedIdx = 0
+		}
+		// Clamp-only — no snap to selectedIdx. See iter-15 TL feedback:
+		// re-centering on every Update would flicker the visible window on
+		// each tick-poll, even when the underlying list is unchanged.
+		off := r.scrollOffset.Load()
+		maxOff := int32(len(r.snap.Decisions) - 1)
+		if maxOff < 0 {
+			maxOff = 0
+		}
+		if off > maxOff {
+			r.scrollOffset.Store(maxOff)
+		}
+		if off < 0 {
+			r.scrollOffset.Store(0)
 		}
 	}
 }
@@ -212,6 +242,26 @@ func (r *renderer) view(width, height int) string {
 	// roughly 50/50 between the two table bodies. See sectionMinRows /
 	// sectionMaxRows for the safety floors and ceilings.
 	decisionsCap, alertsCap := computeSectionCaps(height, r.snap.Err != nil)
+
+	// Publish the current decisions cap so handleNormal can read it without
+	// recomputing the chrome budget. Atomic write is safe under RLock.
+	r.lastDecisionsCap.Store(int32(decisionsCap))
+
+	// Resize-correction: if the terminal shrank and the cursor is now below
+	// the visible window, lift scrollOffset just enough to keep selectedIdx
+	// in view. Performed under RLock via atomic Store — view() runs on the
+	// Bubble Tea goroutine and atomic.Int32 makes this safe against the
+	// fetch goroutine's update() Cmp/Store.
+	if decisionsCap > 0 && len(r.snap.Decisions) > 0 {
+		off := int(r.scrollOffset.Load())
+		if r.selectedIdx >= off+decisionsCap {
+			newOff := r.selectedIdx - decisionsCap + 1
+			if newOff < 0 {
+				newOff = 0
+			}
+			r.scrollOffset.Store(int32(newOff))
+		}
+	}
 
 	b.WriteString(r.titleStyle.Render(fmt.Sprintf("Decisions (top %d by remaining TTL)", decisionsCap)))
 	b.WriteString("\n")
@@ -280,11 +330,32 @@ func (r *renderer) renderDecisions(limit, width int) string {
 	b.WriteString(r.tableHeaderStyle.Width(width).Render(header))
 	b.WriteString("\n")
 
-	n := len(r.snap.Decisions)
-	if n > limit {
-		n = limit
+	// Compute the visible window. start is read from the atomic scrollOffset
+	// so view() and handleNormal stay coherent without lock upgrade. end is
+	// clamped against the slice bounds — defensive even though update() also
+	// clamps, because lapi_mock_test sets selectedIdx directly under WLock.
+	total := len(r.snap.Decisions)
+	start := int(r.scrollOffset.Load())
+	if start > total {
+		start = total
 	}
-	for i := 0; i < n; i++ {
+	if start < 0 {
+		start = 0
+	}
+	end := start + limit
+	if end > total {
+		end = total
+	}
+
+	// "↑ N earlier" marker between header and rows. Newline-discipline:
+	// no "\n" inside Render-arg (iter-10..12 lesson).
+	if start > 0 {
+		marker := fmt.Sprintf("  ↑ %d earlier", start)
+		b.WriteString(r.greyStyle.Render(marker))
+		b.WriteString("\n")
+	}
+
+	for i := start; i < end; i++ {
 		d := r.snap.Decisions[i]
 		ttl := formatDuration(d.RemainingTTL())
 		val := truncate(d.Value, 19)
@@ -310,9 +381,13 @@ func (r *renderer) renderDecisions(limit, width int) string {
 		}
 		b.WriteString("\n")
 	}
-	if len(r.snap.Decisions) > limit {
-		more := fmt.Sprintf("  ... %d more", len(r.snap.Decisions)-limit)
-		b.WriteString(r.greyStyle.Render(more))
+
+	// "↓ N more" marker after the window, mirroring the previous
+	// "... N more" footer but driven by the absolute end-of-window so the
+	// count is correct when scrolled into the middle of the list.
+	if end < total {
+		marker := fmt.Sprintf("  ↓ %d more", total-end)
+		b.WriteString(r.greyStyle.Render(marker))
 		b.WriteString("\n")
 	}
 	return b.String()
@@ -455,11 +530,29 @@ func (r *renderer) handleNormal(msg tea.KeyMsg) bool {
 	case "up", "k":
 		if r.selectedIdx > 0 {
 			r.selectedIdx--
+			// Cursor crossed the top of the window — pull window up.
+			off := int(r.scrollOffset.Load())
+			if r.selectedIdx < off {
+				r.scrollOffset.Store(int32(r.selectedIdx))
+			}
 		}
 		return true
 	case "down", "j":
 		if r.selectedIdx < len(r.snap.Decisions)-1 {
 			r.selectedIdx++
+			// Cursor crossed the bottom of the window — push window down.
+			// Pre-first-render fallback: lastDecisionsCap may still be 0 if
+			// view() hasn't run yet. Use sectionMinRows as a sane default
+			// so navigation still works (the visible window will simply
+			// be re-anchored by view() on its next pass).
+			limit := int(r.lastDecisionsCap.Load())
+			if limit <= 0 {
+				limit = sectionMinRows
+			}
+			off := int(r.scrollOffset.Load())
+			if r.selectedIdx >= off+limit {
+				r.scrollOffset.Store(int32(r.selectedIdx - limit + 1))
+			}
 		}
 		return true
 	case "c":
