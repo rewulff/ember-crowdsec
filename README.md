@@ -205,6 +205,10 @@ Symptoms when this happens:
 
 Upstream tracker: [hslatman/caddy-crowdsec-bouncer](https://github.com/hslatman/caddy-crowdsec-bouncer/issues) — check whether a doc clarification or feature request is open before using `w` against a Caddy host.
 
+## Multi-instance support
+
+This plugin is single-instance by design. It assumes a 1:1 mapping between a Caddy instance and its CrowdSec LAPI, with the plugin running on the same host (localhost LAPI). The plugin does **not** opt into Ember's `MultiInstancePlugin` interface — when used with `ember --addr` repeated (multi-instance mode introduced in Ember 1.4.0), Ember will disable the plugin and emit a warning. Use one Ember-plus-plugin process per Caddy/LAPI pair if you need to monitor multiple instances.
+
 ## Caveat
 
 LAPI is only reachable from `localhost` on the CrowdSec host by default. This plugin is therefore designed to **run on the same host as the CrowdSec agent** (typically the same LXC that serves Caddy). Cross-host LAPI access requires opening the LAPI port + extra TLS hardening — explicitly out of scope for the MVP.
@@ -215,7 +219,6 @@ The module path is `github.com/rewulff/ember-crowdsec`. `go install github.com/r
 
 ## Out of scope (MVP)
 
-- Multi-instance plugin (one ember-crowdsec per Caddy LXC for now)
 - Streaming-endpoint instead of polling
 - Recent Bans sub-tab via MultiRenderer
 - Prometheus exporter via `Exporter` interface
