@@ -20,8 +20,6 @@ type renderMode int
 const (
 	modeNormal renderMode = iota
 	modeConfirmUnban
-	modeInputDuration
-	modeConfirmWhitelist
 )
 
 // statusFadeAfter controls how long the status line stays visible before
@@ -46,12 +44,11 @@ const (
 // HelpBindings on core tabs, not on the plugin's own tab — so the plugin
 // renders its own hint to keep hotkeys discoverable. Suppressed during
 // confirm/input modes, which carry their own prompts.
-const helpFooterText = "↑/↓ select · c toggle CAPI · d unban (local only) · w whitelist"
+const helpFooterText = "↑/↓ select · c toggle CAPI · d unban (local only)"
 
-// renderer holds the latest snapshot, the mode-state for the
-// unban/whitelist UX, and lipgloss styles. Safe for concurrent use:
-// Ember calls Update from the fetch goroutine and View+HandleKey from
-// the TUI goroutine.
+// renderer holds the latest snapshot, the mode-state for the unban UX,
+// and lipgloss styles. Safe for concurrent use: Ember calls Update from
+// the fetch goroutine and View+HandleKey from the TUI goroutine.
 type renderer struct {
 	mu      sync.RWMutex
 	snap    snapshot
@@ -69,7 +66,6 @@ type renderer struct {
 	// Selection / mode state.
 	selectedIdx     int
 	mode            renderMode
-	durationBuf     string // built up in modeInputDuration
 	pendingDecision *Decision
 	statusLine      string
 	statusAt        time.Time
@@ -110,10 +106,9 @@ var (
 
 func newRenderer(actions *actionsClient, audit *auditLog, fetch *fetcher) *renderer {
 	return &renderer{
-		actions:     actions,
-		audit:       audit,
-		fetch:       fetch,
-		durationBuf: "24h",
+		actions: actions,
+		audit:   audit,
+		fetch:   fetch,
 		// titleStyle = Embers titleStyle: Bold + ember-accent. Used for
 		// the tab header line and the section labels ("Decisions ...",
 		// "Recent alerts"). Mirrors styles.go:11-13.
@@ -433,7 +428,7 @@ func (r *renderer) renderAlerts(limit, width int) string {
 	return b.String()
 }
 
-// renderDialog returns the confirm/input overlay for the current mode, or
+// renderDialog returns the confirm overlay for the current mode, or
 // empty string in normal mode. Caller holds r.mu.RLock.
 func (r *renderer) renderDialog() string {
 	switch r.mode {
@@ -444,16 +439,6 @@ func (r *renderer) renderDialog() string {
 		d := r.pendingDecision
 		body := fmt.Sprintf("Unban %s (origin %s, scenario %s)? [y/N]",
 			d.Value, d.Origin, d.Scenario)
-		return r.dialogStyle.Render(body)
-	case modeInputDuration:
-		body := fmt.Sprintf("Whitelist duration: %s_  (Enter to confirm, Esc to cancel)", r.durationBuf)
-		return r.dialogStyle.Render(body)
-	case modeConfirmWhitelist:
-		if r.pendingDecision == nil {
-			return ""
-		}
-		body := fmt.Sprintf("Whitelist %s for %s? [y/N]",
-			r.pendingDecision.Value, r.durationBuf)
 		return r.dialogStyle.Render(body)
 	}
 	return ""
@@ -499,8 +484,13 @@ func (r *renderer) includeCAPI() bool {
 // DELETE on those returns 200 but the next CAPI sync re-pulls the same
 // row, effective no-op. The rule mirrors the server-side filter set:
 // only origin in {crowdsec, cscli} is operator-controlled and genuinely
-// unbannable. CAPI, lists:firehol, lists:tor, ... must be whitelisted
-// instead (whitelist beats ban regardless of origin).
+// unbannable. CAPI, lists:firehol, lists:tor, ... must be allowed via
+// Engine-side postoverflow allowlists (/etc/crowdsec/postoverflows/
+// s01-whitelist/<name>.yaml + systemctl reload crowdsec) — a Decision
+// of type=whitelist is NOT a supported allow-mechanism for bouncers
+// reading from /v1/decisions (the existence of any decision is a block
+// marker for the Caddy bouncer, see README.md "Whitelisting: use
+// Engine-Allowlists" + hslatman/caddy-crowdsec-bouncer#116).
 func originLocal(origin string) bool {
 	return origin == "crowdsec" || origin == "cscli"
 }
@@ -516,10 +506,6 @@ func (r *renderer) handleKey(msg tea.KeyMsg) bool {
 	switch r.mode {
 	case modeConfirmUnban:
 		return r.handleConfirmUnban(msg)
-	case modeInputDuration:
-		return r.handleInputDuration(msg)
-	case modeConfirmWhitelist:
-		return r.handleConfirmWhitelist(msg)
 	default:
 		return r.handleNormal(msg)
 	}
@@ -579,30 +565,19 @@ func (r *renderer) handleNormal(msg tea.KeyMsg) bool {
 		}
 		// Block unban on non-local origins. CAPI / community lists are
 		// pulled from the central feed — DELETE locally is meaningless
-		// because the next CAPI sync re-pulls the row. Whitelist (which
-		// has type=whitelist and beats any ban regardless of origin) is
-		// the correct override; suggest it via the status line and stay
-		// in normal mode (no confirm dialog).
+		// because the next CAPI sync re-pulls the row. Allow-functionality
+		// belongs in the Engine via postoverflow allowlists, not in a
+		// type=whitelist decision (see README "Whitelisting: use
+		// Engine-Allowlists" + hslatman/caddy-crowdsec-bouncer#116).
 		if !originLocal(d.Origin) {
 			r.setStatus(fmt.Sprintf(
-				"Cannot unban %s decision (will re-pull). Use w (whitelist) instead.",
+				"Cannot unban %s decision (will re-pull). Use an Engine allowlist instead.",
 				d.Origin,
 			))
 			return true
 		}
 		r.pendingDecision = d
 		r.mode = modeConfirmUnban
-		return true
-	case "w":
-		if d := r.currentDecision(); d != nil {
-			r.pendingDecision = d
-			if r.durationBuf == "" {
-				r.durationBuf = "24h"
-			}
-			r.mode = modeInputDuration
-		} else {
-			r.setStatus("no decision selected")
-		}
 		return true
 	}
 	return false
@@ -643,70 +618,6 @@ func (r *renderer) handleConfirmUnban(msg tea.KeyMsg) bool {
 		return true
 	}
 	// Other keys: ignore but consume so they don't leak to Ember.
-	return true
-}
-
-func (r *renderer) handleInputDuration(msg tea.KeyMsg) bool {
-	switch msg.String() {
-	case "enter":
-		if _, err := time.ParseDuration(r.durationBuf); err != nil {
-			r.setStatus(fmt.Sprintf("error: invalid duration %q", r.durationBuf))
-			return true
-		}
-		r.mode = modeConfirmWhitelist
-		return true
-	case "esc":
-		r.mode = modeNormal
-		r.pendingDecision = nil
-		return true
-	case "backspace":
-		if len(r.durationBuf) > 0 {
-			r.durationBuf = r.durationBuf[:len(r.durationBuf)-1]
-		}
-		return true
-	}
-	// Append printable single-char keys. Bubble Tea reports them as their
-	// literal string ("a", "1", "h", ...). Filter anything multi-char that
-	// isn't a known printable name.
-	s := msg.String()
-	if len(s) == 1 && s[0] >= 0x20 && s[0] < 0x7f {
-		r.durationBuf += s
-	}
-	return true
-}
-
-func (r *renderer) handleConfirmWhitelist(msg tea.KeyMsg) bool {
-	switch msg.String() {
-	case "y", "Y":
-		d := r.pendingDecision
-		duration := r.durationBuf
-		r.mode = modeNormal
-		r.pendingDecision = nil
-		if d == nil || r.actions == nil {
-			r.setStatus("error: no action client")
-			return true
-		}
-		ip := d.Value
-		r.mu.Unlock()
-		err := r.actions.WhitelistIP(context.Background(), ip, duration, "manual whitelist via ember-tui")
-		r.mu.Lock()
-		errMsg := ""
-		if err != nil {
-			errMsg = err.Error()
-		}
-		r.audit.recordWhitelist(ip, duration, "manual whitelist via ember-tui", errMsg)
-		if err != nil {
-			r.setStatus(fmt.Sprintf("error: whitelist %s: %v", ip, err))
-		} else {
-			r.setStatus(fmt.Sprintf("Whitelisted %s for %s", ip, duration))
-		}
-		r.surfaceAuditError()
-		return true
-	case "n", "N", "esc":
-		r.mode = modeNormal
-		r.pendingDecision = nil
-		return true
-	}
 	return true
 }
 
