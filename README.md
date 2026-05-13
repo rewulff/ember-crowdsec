@@ -1,8 +1,8 @@
 # ember-crowdsec
 
-CrowdSec Bouncer Tab plugin for [alexandre-daubois/ember](https://github.com/alexandre-daubois/ember) (Caddy TUI). Live decisions + alerts pulled from a local CrowdSec LAPI, with hotkeys to **unban** and **whitelist** an IP directly from the TUI. Every write action is journalled to a per-host audit log.
+CrowdSec Bouncer Tab plugin for [alexandre-daubois/ember](https://github.com/alexandre-daubois/ember) (Caddy TUI). Live decisions + alerts pulled from a local CrowdSec LAPI, with a hotkey to **unban** an IP directly from the TUI. Every write action is journalled to a per-host audit log.
 
-> The plugin is **not read-only** — `d` deletes a decision, `w` installs a whitelist entry. Both go through a confirm dialog with the offending IP and scenario in the prompt. See "Killer feature" below.
+> The plugin is **not read-only** — `d` deletes a decision after a confirm dialog with the offending IP and scenario in the prompt. See "Killer feature" below. (A `w`-hotkey for whitelisting existed in v0.1.x–v0.2.x and was removed in v0.3.0 — it was structurally broken; allow-functionality belongs in Engine postoverflow allowlists, see "Whitelisting: use Engine-Allowlists" below.)
 
 ## Status
 
@@ -11,7 +11,7 @@ MVP. Pinned to `ember v1.3.0` because the plugin API is marked EXPERIMENTAL upst
 ## Architecture
 
 - One Caddy host = one LAPI = one `ember-custom` binary running on the same LXC. The plugin connects to LAPI via `localhost` (this is by design — the LAPI is not exposed externally).
-- **Auth split**: read decisions via the bouncer **X-Api-Key** (LAPI rejects JWT on `/v1/decisions` with 401 "token rejected twice"); read alerts and run delete/whitelist actions via the machine-account **JWT**. Verified against `crowdsecurity/crowdsec/pkg/apiserver/controllers/controller.go` lines 113-145, plus a smoke against CT 122 on 2026-05-07.
+- **Auth split**: read decisions via the bouncer **X-Api-Key** (LAPI rejects JWT on `/v1/decisions` with 401 "token rejected twice"); read alerts and run delete actions via the machine-account **JWT**. Verified against `crowdsecurity/crowdsec/pkg/apiserver/controllers/controller.go` lines 113-145, plus a smoke against CT 122 on 2026-05-07.
 - Fetch: tick-based polling. Decisions and alerts run in parallel goroutines on each tick.
 - Render: Bubble Tea / lipgloss. Decisions sorted by remaining TTL desc, alerts by created_at desc, header + per-section badges, status-count badge in the tab-bar.
 
@@ -28,7 +28,7 @@ You need a working Caddy + CrowdSec stack on the host the plugin will run on. If
 ```sh
 # On the LXC running CrowdSec:
 
-# Machine account — drives JWT for alerts, delete, whitelist:
+# Machine account — drives JWT for alerts + delete:
 cscli machines add ember-tui --auto -f -
 
 # Bouncer credential — drives X-Api-Key for /v1/decisions:
@@ -55,7 +55,7 @@ go install github.com/rewulff/ember-crowdsec/cmd/ember-custom@v0.1.0
 
 The binary lands in `$(go env GOBIN)` (or `$(go env GOPATH)/bin` if `GOBIN` is unset).
 
-> **Which tag to install?** `@v0.1.0` is the supported stock-pinned release that works with Ember `v1.3.0` out of the box, with documented caveats (stepped whitelist duration, inline hotkey hints — see "Killer feature" below). The `main` branch is rolling and assumes upstream Ember PRs that haven't landed yet (`go install ...@main` builds, but the new UX features are no-ops until a future Ember release ships them). See [`ROADMAP.md`](ROADMAP.md) for v0.1.0 → v0.2.0 migration.
+> **Which tag to install?** `@v0.1.0` is the supported stock-pinned release that works with Ember `v1.3.0` out of the box. The `main` branch is rolling and assumes upstream Ember PRs that haven't landed yet (`go install ...@main` builds, but the new UX features are no-ops until a future Ember release ships them). See [`ROADMAP.md`](ROADMAP.md) for v0.1.0 → v0.2.0 migration. v0.3.0 removed the `w` (whitelist) hotkey — see "Whitelisting: use Engine-Allowlists" below.
 
 ### 3. Run with environment configuration
 
@@ -126,7 +126,7 @@ All env-vars use the prefix `EMBER_PLUGIN_CROWDSEC_` (the plugin name is `crowds
 | `EMBER_PLUGIN_CROWDSEC_FETCH_INTERVAL` | no | (Ember default) | Validated as duration; tick-rate handled by Ember |
 | `EMBER_PLUGIN_CROWDSEC_INSECURE_TLS` | no | `false` | Set `true` if LAPI uses a self-signed cert |
 
-## Killer feature: unban + whitelist from the TUI
+## Killer feature: unban from the TUI
 
 The CrowdSec tab is interactive:
 
@@ -135,13 +135,12 @@ The CrowdSec tab is interactive:
 | `↑/↓` (or `j/k`) | normal | Move the decision cursor |
 | `c` | normal | Toggle CAPI inclusion (see "Origin filter" below) |
 | `d` | normal | Confirm-unban prompt — **only on `crowdsec` / `cscli` decisions** |
-| `w` | normal | Whitelist input flow (duration default `24h`); allowed on all origins |
-| `y / Y` | confirm-unban / confirm-whitelist | Run the action |
-| `n / N / Esc` | any confirm | Cancel |
-| `Enter` | input-duration | Advance to confirm-whitelist |
-| printable + `Backspace` | input-duration | Edit the duration buffer |
+| `y / Y` | confirm-unban | Run the unban |
+| `n / N / Esc` | confirm-unban | Cancel |
 
-Every confirm dialog shows the IP, origin and scenario inline so accidental hits are unlikely. While in any non-normal mode the plugin **consumes every keystroke** so that other tabs/global shortcuts don't fire mid-flow.
+The confirm dialog shows the IP, origin and scenario inline so accidental hits are unlikely. While in confirm-mode the plugin **consumes every keystroke** so that other tabs/global shortcuts don't fire mid-flow.
+
+> **No more `w` (whitelist)?** Correct — removed in v0.3.0 (Forgejo [#13](https://forgejo.routetohome.renewulff.de/formin/ember-crowdsec/issues/13)). The hotkey produced a `type=whitelist` decision via `POST /v1/alerts`, which the Caddy bouncer reads as a block (the existence of any decision is a block marker; see "Whitelisting: use Engine-Allowlists" below). Use Engine-side postoverflow allowlists instead.
 
 ### Origin filter (default = your decisions only)
 
@@ -169,20 +168,17 @@ CrowdSec — 50217 decisions, 4 alerts (last fetch 14:23:55, filter: ALL, c: hid
 CAPI and community-list rows live in CrowdSec's central feed. `DELETE /v1/decisions/{id}` succeeds locally on those, but the next CAPI sync re-pulls the same row — the unban is effectively a no-op and the operator sees the ban "come back". The plugin therefore blocks `d` on any non-`crowdsec`/`cscli` origin and shows:
 
 ```
-Cannot unban CAPI decision (will re-pull). Use w (whitelist) instead.
+Cannot unban CAPI decision (will re-pull). Use an Engine allowlist instead.
 ```
 
-`w` (whitelist) **is** the right action here — a `type=whitelist` decision beats any ban regardless of origin, including CAPI rows. Whitelist remains allowed on every selected decision.
-
-The whitelist body mirrors what `cscli decisions add --type whitelist` sends: a `POST /v1/alerts` with one alert containing one decision (`type=whitelist`, `origin=ember-tui`). Verified against `crowdsec/cmd/crowdsec-cli/clidecision/decisions.go` `cli.add()` lines 256-388 (master @ 2026-05-07).
+For genuine allow-functionality on CAPI / list-sourced IPs, edit `/etc/crowdsec/postoverflows/s01-whitelist/<name>.yaml` and `systemctl reload crowdsec` — see "Whitelisting: use Engine-Allowlists" below.
 
 ### Audit log
 
-Each unban / whitelist attempt is journalled — successes **and** failures — to the path in `EMBER_PLUGIN_CROWDSEC_AUDIT_LOG`. Format is JSON-Lines, mode 0600, append-only:
+Each unban attempt is journalled — successes **and** failures — to the path in `EMBER_PLUGIN_CROWDSEC_AUDIT_LOG`. Format is JSON-Lines, mode 0600, append-only:
 
 ```json
 {"ts":"2026-05-07T12:34:56Z","action":"unban","ip":"1.2.3.4","decision_id":12345,"status":"ok"}
-{"ts":"2026-05-07T12:35:08Z","action":"whitelist","ip":"5.6.7.8","duration":"24h","reason":"manual whitelist via ember-tui","status":"ok"}
 {"ts":"2026-05-07T12:36:11Z","action":"unban","ip":"9.9.9.9","decision_id":9999,"status":"error","error":"delete decision 9999: status 500: boom"}
 ```
 
@@ -196,11 +192,11 @@ If the audit-log file cannot be opened or written, the plugin keeps running but 
 
 > the existence of at least a single Decision means that the IP should not be allowed
 
-That is a defensible design choice for a block-list bouncer, not a bug. The TUI's `w` hotkey is therefore structurally unhelpful for real allow-functionality — pressing it today produces a `type=whitelist` decision that bouncers see as a block, which on a Caddy host can trigger a `LePresidente/http-generic-403-bf` self-ban loop on the very IP you tried to allow.
+That is a defensible design choice for a block-list bouncer, not a bug. The TUI's `w` hotkey was therefore structurally unhelpful for real allow-functionality — it produced a `type=whitelist` decision that bouncers see as a block, which on a Caddy host could trigger a `LePresidente/http-generic-403-bf` self-ban loop on the very IP you tried to allow.
 
 **Do this instead.** Allow-functionality in CrowdSec belongs in the Engine via centralized allowlists: <https://docs.crowdsec.net/docs/local_api/centralized_allowlists/>. The on-disk path is `/etc/crowdsec/postoverflows/s01-whitelist/<name>.yaml`; reload with `systemctl reload crowdsec` after edits.
 
-The `w` hotkey will be reworked (likely removed) — see [#13](https://forgejo.routetohome.renewulff.de/formin/ember-crowdsec/issues/13) for the structural fix.
+The `w` hotkey was removed in v0.3.0 (see [#13](https://forgejo.routetohome.renewulff.de/formin/ember-crowdsec/issues/13)). For allow-functionality, edit `/etc/crowdsec/postoverflows/s01-whitelist/<name>.yaml` and `systemctl reload crowdsec`.
 
 ## Multi-instance support
 
@@ -221,7 +217,7 @@ The module path is `github.com/rewulff/ember-crowdsec`. `go install github.com/r
 - Prometheus exporter via `Exporter` interface
 - Filter/sort via `HandleKey` (IP/origin/scenario)
 - Detail-view for alerts
-- Bulk operations (multiple IPs unbanned/whitelisted in one keystroke)
+- Bulk operations (multiple IPs unbanned in one keystroke)
 - CI / linting
 
 These will land in a follow-up release sprint once the plugin API stabilizes upstream.

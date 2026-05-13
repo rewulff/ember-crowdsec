@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -38,7 +37,6 @@ type mockLAPI struct {
 	decisionsHits       atomic.Int32
 	alertsHits          atomic.Int32
 	deleteDecisionsHits atomic.Int32
-	postAlertsHits      atomic.Int32
 
 	// Behaviour knobs.
 	tokenLifetime         time.Duration // sent as `expire` in login response
@@ -62,10 +60,6 @@ type mockLAPI struct {
 	// least one of them shows up in View output.
 	decisionValues []string
 
-	// Captured POST /v1/alerts bodies for whitelist verification.
-	postedAlertsMu sync.Mutex
-	postedAlerts   [][]alertCreateRequest
-
 	// lastDecisionsQuery captures the raw query string of the most recent
 	// GET /v1/decisions, so origin-filter tests can assert on it without
 	// shipping a custom transport.
@@ -87,9 +81,9 @@ func newMockLAPI(t *testing.T) *mockLAPI {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/watchers/login", m.handleLogin)
-	mux.HandleFunc("/v1/decisions", m.handleDecisions)        // GET (bouncer)
-	mux.HandleFunc("/v1/decisions/", m.handleDecisionDelete)  // DELETE /v1/decisions/{id}
-	mux.HandleFunc("/v1/alerts", m.handleAlerts)              // GET (jwt) + POST (jwt)
+	mux.HandleFunc("/v1/decisions", m.handleDecisions)       // GET (bouncer)
+	mux.HandleFunc("/v1/decisions/", m.handleDecisionDelete) // DELETE /v1/decisions/{id}
+	mux.HandleFunc("/v1/alerts", m.handleAlertsGet)          // GET (jwt) — POST removed with whitelist (#13)
 
 	m.srv = httptest.NewServer(mux)
 	t.Cleanup(m.srv.Close)
@@ -215,18 +209,11 @@ func (m *mockLAPI) lastDecisionsQueryStr() string {
 	return m.lastDecisionsQuery
 }
 
-func (m *mockLAPI) handleAlerts(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		m.handleAlertsGet(w, r)
-	case http.MethodPost:
-		m.handleAlertsPost(w, r)
-	default:
-		http.Error(w, "method", http.StatusMethodNotAllowed)
-	}
-}
-
 func (m *mockLAPI) handleAlertsGet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
 	m.alertsHits.Add(1)
 	if !m.requireBearer(w, r) {
 		return
@@ -260,34 +247,6 @@ func (m *mockLAPI) handleAlertsGet(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(out)
 }
 
-// handleAlertsPost mocks the cscli "decisions add" path (whitelist + manual
-// bans). Captures the body for assertion in tests.
-func (m *mockLAPI) handleAlertsPost(w http.ResponseWriter, r *http.Request) {
-	m.postAlertsHits.Add(1)
-	if !m.requireBearer(w, r) {
-		return
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	var alerts []alertCreateRequest
-	if err := json.Unmarshal(body, &alerts); err != nil {
-		http.Error(w, "bad alert body: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	m.postedAlertsMu.Lock()
-	m.postedAlerts = append(m.postedAlerts, alerts)
-	m.postedAlertsMu.Unlock()
-
-	// CrowdSec swagger says POST /v1/alerts returns 201 with []string of
-	// created alert IDs. We mimic that for realism.
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode([]string{"42"})
-}
-
 // handleDecisionDelete mocks DELETE /v1/decisions/{id}. failNextDelete>0
 // returns 500 to exercise the audit-log-on-failure path.
 func (m *mockLAPI) handleDecisionDelete(w http.ResponseWriter, r *http.Request) {
@@ -306,17 +265,6 @@ func (m *mockLAPI) handleDecisionDelete(w http.ResponseWriter, r *http.Request) 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"nbDeleted": "1"})
-}
-
-// firstPostedAlert returns the first captured POST /v1/alerts body, or nil
-// if none. Concurrent-safe.
-func (m *mockLAPI) firstPostedAlert() []alertCreateRequest {
-	m.postedAlertsMu.Lock()
-	defer m.postedAlertsMu.Unlock()
-	if len(m.postedAlerts) == 0 {
-		return nil
-	}
-	return m.postedAlerts[0]
 }
 
 // provisionPlugin builds a CrowdSecPlugin pointed at the mock LAPI. The
@@ -584,62 +532,7 @@ func TestDelete_HappyPath(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: Whitelist happy path + body verification + audit
-// ---------------------------------------------------------------------------
-
-func TestWhitelist_HappyPath(t *testing.T) {
-	t.Parallel()
-
-	m := newMockLAPI(t)
-	p := provisionPlugin(t, m)
-
-	if err := p.actions.WhitelistIP(context.Background(), "5.6.7.8", "12h", "test-reason"); err != nil {
-		t.Fatalf("WhitelistIP: %v", err)
-	}
-	if got, want := m.postAlertsHits.Load(), int32(1); got != want {
-		t.Errorf("postAlertsHits = %d, want %d", got, want)
-	}
-
-	posted := m.firstPostedAlert()
-	if len(posted) != 1 {
-		t.Fatalf("posted alerts = %d, want 1", len(posted))
-	}
-	alert := posted[0]
-	if len(alert.Decisions) != 1 {
-		t.Fatalf("alert.decisions = %d, want 1", len(alert.Decisions))
-	}
-	dec := alert.Decisions[0]
-	if dec.Type == nil || *dec.Type != "whitelist" {
-		t.Errorf("decision type = %v, want %q", dec.Type, "whitelist")
-	}
-	if dec.Value == nil || *dec.Value != "5.6.7.8" {
-		t.Errorf("decision value = %v, want %q", dec.Value, "5.6.7.8")
-	}
-	if dec.Duration == nil || *dec.Duration != "12h" {
-		t.Errorf("decision duration = %v, want %q", dec.Duration, "12h")
-	}
-	if dec.Origin == nil || *dec.Origin != "ember-tui" {
-		t.Errorf("decision origin = %v, want %q", dec.Origin, "ember-tui")
-	}
-	if alert.Source == nil || alert.Source.IP != "5.6.7.8" {
-		t.Errorf("alert.source.ip = %v, want %q", alert.Source, "5.6.7.8")
-	}
-
-	// Drive the audit through the renderer-style helper to lock in the wire
-	// format check.
-	p.audit.recordWhitelist("5.6.7.8", "12h", "test-reason", "")
-	entries := auditLines(t, p)
-	if len(entries) != 1 {
-		t.Fatalf("audit entries = %d, want 1", len(entries))
-	}
-	e := entries[0]
-	if e.Action != "whitelist" || e.IP != "5.6.7.8" || e.Duration != "12h" || e.Status != "ok" {
-		t.Errorf("audit entry = %+v, want whitelist/5.6.7.8/12h/ok", e)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Test 7: Audit is also written on action failure
+// Test 6: Audit is also written on action failure
 // ---------------------------------------------------------------------------
 
 func TestAuditLog_AlsoOnFailure(t *testing.T) {
@@ -698,52 +591,7 @@ func TestRenderer_UnbanFlow(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 9: Renderer whitelist flow with duration input
-// ---------------------------------------------------------------------------
-
-func TestRenderer_WhitelistFlow(t *testing.T) {
-	t.Parallel()
-
-	m := newMockLAPI(t)
-	p := provisionPlugin(t, m)
-	_ = fetchAndUpdate(t, p)
-
-	// w → backspace*3 → "1h" → enter → y
-	keys := []tea.KeyMsg{
-		{Type: tea.KeyRunes, Runes: []rune{'w'}},
-		{Type: tea.KeyBackspace}, // erase "h"
-		{Type: tea.KeyBackspace}, // erase "4"
-		{Type: tea.KeyBackspace}, // erase "2"
-		{Type: tea.KeyRunes, Runes: []rune{'1'}},
-		{Type: tea.KeyRunes, Runes: []rune{'h'}},
-		{Type: tea.KeyEnter},
-		{Type: tea.KeyRunes, Runes: []rune{'y'}},
-	}
-	for i, k := range keys {
-		if !p.HandleKey(k) {
-			t.Fatalf("HandleKey #%d %v returned false, want true", i, k)
-		}
-	}
-
-	if got, want := m.postAlertsHits.Load(), int32(1); got != want {
-		t.Errorf("postAlertsHits = %d, want %d", got, want)
-	}
-	posted := m.firstPostedAlert()
-	if len(posted) != 1 || len(posted[0].Decisions) != 1 {
-		t.Fatalf("posted alert shape unexpected: %+v", posted)
-	}
-	if d := posted[0].Decisions[0]; d.Duration == nil || *d.Duration != "1h" {
-		t.Errorf("decision duration = %v, want %q", d.Duration, "1h")
-	}
-
-	entries := auditLines(t, p)
-	if len(entries) != 1 || entries[0].Action != "whitelist" || entries[0].Duration != "1h" {
-		t.Errorf("audit = %+v, want whitelist/1h", entries)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Test 10: Default fetch carries origins=crowdsec,cscli filter
+// Test 9: Default fetch carries origins=crowdsec,cscli filter
 // ---------------------------------------------------------------------------
 
 // Locks in the Iteration 3 default: GET /v1/decisions must server-side filter
@@ -860,7 +708,7 @@ func TestRenderer_ToggleCAPI(t *testing.T) {
 
 // Selects the firehol-list row (only visible when CAPI is included), presses
 // 'd', and asserts: no confirm dialog opens, mode stays normal, status line
-// suggests whitelist, and no DELETE request was sent.
+// suggests an Engine allowlist, and no DELETE request was sent.
 func TestRenderer_BlockUnbanCAPI(t *testing.T) {
 	t.Parallel()
 
@@ -904,8 +752,8 @@ func TestRenderer_BlockUnbanCAPI(t *testing.T) {
 	if pending != nil {
 		t.Errorf("pendingDecision = %+v after blocked 'd', want nil", pending)
 	}
-	if !strings.Contains(status, "Cannot unban") || !strings.Contains(status, "whitelist") {
-		t.Errorf("status line = %q, want hint about whitelist", status)
+	if !strings.Contains(status, "Cannot unban") || !strings.Contains(status, "Engine allowlist") {
+		t.Errorf("status line = %q, want hint about Engine allowlist", status)
 	}
 	if got := m.deleteDecisionsHits.Load(); got != beforeDeletes {
 		t.Errorf("DELETE was sent (%d -> %d) but block should prevent it", beforeDeletes, got)

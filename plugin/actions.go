@@ -12,22 +12,23 @@ import (
 	"time"
 )
 
-// actionsClient implements the killer-feature write-path (unban + whitelist)
-// against the CrowdSec LAPI. Auth is the machine-account JWT — DELETE and
-// POST on /v1/decisions/{id} resp. /v1/alerts require Bearer (X-Api-Key
-// would yield 401 same as the bouncer-key on read endpoints in reverse).
+// actionsClient implements the write-path (unban) against the CrowdSec
+// LAPI. Auth is the machine-account JWT — DELETE on /v1/decisions/{id}
+// requires Bearer (X-Api-Key would yield 401 same as the bouncer-key on
+// read endpoints in reverse).
+//
+// The plugin previously also exposed a WhitelistIP path via POST /v1/alerts
+// (cscli "decisions add --type whitelist"). That path was removed in v0.3.0
+// (Forgejo #13 + hslatman/caddy-crowdsec-bouncer#116): bouncers treat the
+// existence of any decision as a block marker, so a type=whitelist decision
+// is read as a block by the Caddy bouncer — not an allow. Engine-side
+// postoverflow allowlists (/etc/crowdsec/postoverflows/s01-whitelist/<n>.yaml
+// + systemctl reload crowdsec) are the supported allow-mechanism.
 type actionsClient struct {
 	auth       *authClient
 	base       string
 	httpClient *http.Client
-	origin     string // origin tag stamped on whitelist decisions
 }
-
-const (
-	defaultWhitelistOrigin = "ember-tui"
-	whitelistType          = "whitelist"
-	whitelistScope         = "Ip"
-)
 
 func newActionsClient(auth *authClient, base string) *actionsClient {
 	return &actionsClient{
@@ -37,7 +38,6 @@ func newActionsClient(auth *authClient, base string) *actionsClient {
 			Timeout:   10 * time.Second,
 			Transport: auth.httpClient.Transport,
 		},
-		origin: defaultWhitelistOrigin,
 	}
 }
 
@@ -56,85 +56,6 @@ func (a *actionsClient) DeleteDecision(ctx context.Context, id int64) error {
 	}
 	if status != http.StatusOK {
 		return fmt.Errorf("delete decision %d: %s", id, sanitizeAPIError(status, body))
-	}
-	return nil
-}
-
-// WhitelistIP installs a new whitelist decision for the given IP via the
-// /v1/alerts endpoint (cscli's "decisions add --type whitelist" path). The
-// alert is constructed with the same skeleton cscli uses (verified against
-// crowdsecurity/crowdsec cmd/crowdsec-cli/clidecision/decisions.go cli.add()
-// lines 256-388, master @ 2026-05-07): a single Source, a single Decision,
-// empty Events slice, simulated=false. CreatedAt / StartAt / StopAt are all
-// "now" RFC3339 — duration on the inner decision drives expiry.
-//
-// Body fields not provided by us (kept absent or omitempty): scenario_hash,
-// scenario_version, simulated — set to empty/false matching cscli defaults.
-func (a *actionsClient) WhitelistIP(ctx context.Context, ip, duration, reason string) error {
-	if ip == "" {
-		return errors.New("whitelist: ip required")
-	}
-	if duration == "" {
-		duration = "24h"
-	}
-	if _, err := time.ParseDuration(duration); err != nil {
-		return fmt.Errorf("whitelist: invalid duration %q: %w", duration, err)
-	}
-	if reason == "" {
-		reason = "manual whitelist via ember-tui"
-	}
-
-	now := time.Now().UTC().Format(time.RFC3339)
-	scope := whitelistScope
-	value := ip
-	dType := whitelistType
-	dDur := duration
-	dOrigin := a.origin
-
-	// LAPI's swagger requires pointer fields on Alert/Decision/Source for
-	// presence-detection (cscli uses the generated client, we hand-build the
-	// JSON to avoid the dependency). Marshalling a struct with explicit
-	// fields is equivalent for the wire format.
-	alert := alertCreateRequest{
-		Capacity:        intPtr(0),
-		Decisions: []alertCreateDecision{
-			{
-				Type:     &dType,
-				Value:    &value,
-				Duration: &dDur,
-				Scope:    &scope,
-				Origin:   &dOrigin,
-				Scenario: &reason,
-			},
-		},
-		Events:          []alertCreateEvent{},
-		EventsCount:     intPtr(1),
-		Leakspeed:       strPtr("0"),
-		Message:         &reason,
-		Scenario:        &reason,
-		ScenarioHash:    strPtr(""),
-		ScenarioVersion: strPtr(""),
-		Simulated:       boolPtr(false),
-		Source: &alertCreateSource{
-			IP:    ip,
-			Scope: &scope,
-			Value: &value,
-		},
-		StartAt:   &now,
-		StopAt:    &now,
-		CreatedAt: now,
-	}
-
-	payload, err := json.Marshal([]alertCreateRequest{alert})
-	if err != nil {
-		return fmt.Errorf("marshal whitelist alert: %w", err)
-	}
-	body, status, err := a.authedDo(ctx, http.MethodPost, "/v1/alerts", payload)
-	if err != nil {
-		return err
-	}
-	if status != http.StatusOK && status != http.StatusCreated {
-		return fmt.Errorf("whitelist %s: %s", ip, sanitizeAPIError(status, body))
 	}
 	return nil
 }
@@ -205,49 +126,4 @@ func sanitizeAPIError(statusCode int, body []byte) string {
 		return fmt.Sprintf("status %d: %s", statusCode, msg)
 	}
 	return fmt.Sprintf("status %d", statusCode)
-}
-
-func intPtr(i int32) *int32   { return &i }
-func strPtr(s string) *string { return &s }
-func boolPtr(b bool) *bool    { return &b }
-
-// alertCreateRequest mirrors models.Alert from CrowdSec's swagger. Only the
-// fields cscli's "decisions add" path populates are present here; other
-// fields are unused/empty by design.
-type alertCreateRequest struct {
-	Capacity        *int32                `json:"capacity"`
-	Decisions       []alertCreateDecision `json:"decisions"`
-	Events          []alertCreateEvent    `json:"events"`
-	EventsCount     *int32                `json:"events_count"`
-	Leakspeed       *string               `json:"leakspeed"`
-	Message         *string               `json:"message"`
-	Scenario        *string               `json:"scenario"`
-	ScenarioHash    *string               `json:"scenario_hash"`
-	ScenarioVersion *string               `json:"scenario_version"`
-	Simulated       *bool                 `json:"simulated"`
-	Source          *alertCreateSource    `json:"source"`
-	StartAt         *string               `json:"start_at"`
-	StopAt          *string               `json:"stop_at"`
-	CreatedAt       string                `json:"created_at,omitempty"`
-}
-
-type alertCreateDecision struct {
-	Type     *string `json:"type"`
-	Value    *string `json:"value"`
-	Duration *string `json:"duration"`
-	Scope    *string `json:"scope"`
-	Origin   *string `json:"origin"`
-	Scenario *string `json:"scenario,omitempty"`
-}
-
-type alertCreateSource struct {
-	IP    string  `json:"ip"`
-	Scope *string `json:"scope"`
-	Value *string `json:"value"`
-}
-
-// alertCreateEvent is a placeholder — cscli sends an empty events slice for
-// manual alerts. We mirror that behaviour: never populate, just emit `[]`.
-type alertCreateEvent struct {
-	Timestamp *string `json:"timestamp,omitempty"`
 }

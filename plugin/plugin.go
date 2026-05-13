@@ -109,9 +109,9 @@ func (p *CrowdSecPlugin) View(width, height int) string {
 	return p.render.view(width, height)
 }
 
-// HandleKey delegates to the renderer which manages the unban/whitelist mode
+// HandleKey delegates to the renderer which manages the unban confirm-mode
 // state machine. Returns true to keep the keystroke from bubbling up to Ember
-// when the renderer is in a confirm/input mode (keyboard lock-out).
+// when the renderer is in a confirm mode (keyboard lock-out).
 func (p *CrowdSecPlugin) HandleKey(msg tea.KeyMsg) bool {
 	if p.render == nil {
 		return false
@@ -133,16 +133,17 @@ func (p *CrowdSecPlugin) StatusCount() string {
 }
 
 // HelpBindings returns per-tab footer shortcuts. Iteration 2 added unban
-// (d) + whitelist (w); Iteration 3 adds the CAPI inclusion toggle (c) so
-// the operator can flip between "decisions on MY caddy" (default,
-// origins=crowdsec,cscli) and the full feed view including CAPI Threat
-// Intel + community blocklists.
+// (d); Iteration 3 adds the CAPI inclusion toggle (c) so the operator can
+// flip between "decisions on MY caddy" (default, origins=crowdsec,cscli)
+// and the full feed view including CAPI Threat Intel + community
+// blocklists. The whitelist hotkey (w) was removed in v0.3.0 (#13) —
+// allow-functionality belongs in Engine postoverflow allowlists, not in
+// a type=whitelist decision (see README).
 func (p *CrowdSecPlugin) HelpBindings() []emberplugin.HelpBinding {
 	return []emberplugin.HelpBinding{
 		{Key: "↑/↓", Desc: "select decision"},
 		{Key: "c", Desc: "toggle CAPI"},
 		{Key: "d", Desc: "unban (local+cscli only)"},
-		{Key: "w", Desc: "whitelist"},
 	}
 }
 
@@ -188,7 +189,7 @@ func parseOptions(opts map[string]string) (pluginCfg, error) {
 		return cfg, errors.New("EMBER_PLUGIN_CROWDSEC_BOUNCER_KEY is required (run: cscli bouncers add ember-tui-bouncer)")
 	}
 
-	// Audit-log path: writeable file for delete/whitelist actions. Default
+	// Audit-log path: writeable file for unban actions. Default
 	// to the user's home directory so we don't require root for the MVP.
 	cfg.auditLog = opts["audit_log"]
 	if cfg.auditLog == "" {

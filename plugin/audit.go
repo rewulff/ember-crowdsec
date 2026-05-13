@@ -29,12 +29,10 @@ type auditLog struct {
 // auditEntry is one line in the JSON-Lines log.
 type auditEntry struct {
 	TS         string `json:"ts"`
-	Action     string `json:"action"`             // "unban" | "whitelist"
+	Action     string `json:"action"` // "unban" (only action since v0.3.0; whitelist removed in #13)
 	IP         string `json:"ip,omitempty"`
 	DecisionID int64  `json:"decision_id,omitempty"`
-	Duration   string `json:"duration,omitempty"`
-	Reason     string `json:"reason,omitempty"`
-	Status     string `json:"status"`             // "ok" | "error"
+	Status     string `json:"status"` // "ok" | "error"
 	Error      string `json:"error,omitempty"`
 }
 
@@ -80,26 +78,6 @@ func (l *auditLog) recordUnban(decisionID int64, ip string, errMsg string) {
 		DecisionID: decisionID,
 		Status:     status,
 		Error:      errMsg,
-	})
-}
-
-// recordWhitelist logs a whitelist attempt. errMsg is empty on success.
-func (l *auditLog) recordWhitelist(ip, duration, reason, errMsg string) {
-	if l == nil {
-		return
-	}
-	status := "ok"
-	if errMsg != "" {
-		status = "error"
-	}
-	l.write(auditEntry{
-		TS:       time.Now().UTC().Format(time.RFC3339),
-		Action:   "whitelist",
-		IP:       ip,
-		Duration: duration,
-		Reason:   reason,
-		Status:   status,
-		Error:    errMsg,
 	})
 }
 
