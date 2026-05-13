@@ -188,22 +188,19 @@ Each unban / whitelist attempt is journalled — successes **and** failures — 
 
 If the audit-log file cannot be opened or written, the plugin keeps running but the renderer surfaces `audit log write failed: ...` in its status line so you notice. The journal touches privileged actions — keep the file on a restrictive filesystem and don't sync it off-host without redaction.
 
-## Bouncer compatibility — whitelist hotkey
+## Whitelisting: use Engine-Allowlists, not Decisions
 
-The `w` (whitelist) hotkey creates a CrowdSec decision with `type: whitelist`. **This requires a bouncer that respects whitelist semantics.**
+> **Heads-up on the `w` hotkey.** We initially framed this as a bouncer issue — that was wrong. After maintainer feedback on [hslatman/caddy-crowdsec-bouncer#116](https://github.com/hslatman/caddy-crowdsec-bouncer/issues/116) we updated this section. Thanks to @hslatman for the clarification.
 
-### Known incompatibility: `hslatman/caddy-crowdsec-bouncer`
+`cscli decisions add --type whitelist` is **not an officially supported decision type**. CrowdSec's CLI accepts the string, but the only documented decision types are `ban`, `captcha`, and `throttle` — any bouncer reading from `/v1/decisions` treats the **existence of a decision** as a block marker, regardless of the `type` field. From `hslatman/caddy-crowdsec-bouncer` `internal/core/store.go`:
 
-This popular Caddy bouncer is implemented as a **block-list only** — every decision (regardless of type) is treated as a 403 block. A whitelist decision created via `w` will therefore **block the IP instead of allowing it**, and the resulting 403 salvo can trigger a `LePresidente/http-generic-403-bf` self-ban loop on the very same host that issued the whitelist.
+> the existence of at least a single Decision means that the IP should not be allowed
 
-Symptoms when this happens:
-- Caddy access log shows `WARN got crowdsec decision type: whitelist` immediately followed by `status: 403`
-- The whitelisted IP is invisible in `cscli decisions list` (default view filters to `ban`)
-- A new ban for the same IP appears within seconds, scenario `LePresidente/http-generic-403-bf`
+That is a defensible design choice for a block-list bouncer, not a bug. The TUI's `w` hotkey is therefore structurally unhelpful for real allow-functionality — pressing it today produces a `type=whitelist` decision that bouncers see as a block, which on a Caddy host can trigger a `LePresidente/http-generic-403-bf` self-ban loop on the very IP you tried to allow.
 
-**Workaround** until plugin behavior changes: use Engine-Whitelists via `/etc/crowdsec/postoverflows/s01-whitelist/<name>.yaml` instead of Decision-Whitelists. The TUI's `w` hotkey is safe with bouncers that distinguish decision types (CrowdSec official bouncers, nginx, traefik, HAProxy).
+**Do this instead.** Allow-functionality in CrowdSec belongs in the Engine via centralized allowlists: <https://docs.crowdsec.net/docs/local_api/centralized_allowlists/>. The on-disk path is `/etc/crowdsec/postoverflows/s01-whitelist/<name>.yaml`; reload with `systemctl reload crowdsec` after edits.
 
-Upstream tracker: [hslatman/caddy-crowdsec-bouncer](https://github.com/hslatman/caddy-crowdsec-bouncer/issues) — check whether a doc clarification or feature request is open before using `w` against a Caddy host.
+The `w` hotkey will be reworked (likely removed) — see [#13](https://forgejo.routetohome.renewulff.de/formin/ember-crowdsec/issues/13) for the structural fix.
 
 ## Multi-instance support
 
