@@ -37,7 +37,6 @@ func newTestRenderer() *renderer {
 		tableHeaderStyle: lipgloss.NewStyle(),
 		selectedRowStyle: lipgloss.NewStyle().Reverse(true),
 		greyStyle:        lipgloss.NewStyle(),
-		durationBuf:      "24h",
 	}
 }
 
