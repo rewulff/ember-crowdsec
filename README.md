@@ -6,7 +6,7 @@ CrowdSec Bouncer Tab plugin for [alexandre-daubois/ember](https://github.com/ale
 
 ## Status
 
-MVP. Pinned to `ember v1.3.0` because the plugin API is marked EXPERIMENTAL upstream.
+v0.2.0. Pinned to `ember v1.4.0`. Plugin API is marked EXPERIMENTAL upstream — v0.3.0 will follow once Ember v1.5.0 ships (see [`ROADMAP.md`](ROADMAP.md)).
 
 ## Architecture
 
