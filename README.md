@@ -2,11 +2,11 @@
 
 CrowdSec Bouncer Tab plugin for [alexandre-daubois/ember](https://github.com/alexandre-daubois/ember) (Caddy TUI). Live decisions + alerts pulled from a local CrowdSec LAPI, with a hotkey to **unban** an IP directly from the TUI. Every write action is journalled to a per-host audit log.
 
-> The plugin is **not read-only** — `d` deletes a decision after a confirm dialog with the offending IP and scenario in the prompt. See "Killer feature" below. (A `w`-hotkey for whitelisting existed in v0.1.x–v0.2.x and was removed in v0.3.0 — it was structurally broken; allow-functionality belongs in Engine postoverflow allowlists, see "Whitelisting: use Engine-Allowlists" below.)
+> The plugin is **not read-only** — `d` deletes a decision after a confirm dialog with the offending IP and scenario in the prompt. See "Killer feature" below. (A `w`-hotkey for whitelisting existed in v0.1.x and was removed in v0.2.0 — it was structurally broken; allow-functionality belongs in Engine postoverflow allowlists, see "Whitelisting: use Engine-Allowlists" below.)
 
 ## Status
 
-MVP. Pinned to `ember v1.3.0` because the plugin API is marked EXPERIMENTAL upstream.
+v0.2.0. Pinned to `ember v1.4.0`. Plugin API is marked EXPERIMENTAL upstream — v0.3.0 will follow once Ember v1.5.0 ships (see [`ROADMAP.md`](ROADMAP.md)).
 
 ## Architecture
 
@@ -55,7 +55,7 @@ go install github.com/rewulff/ember-crowdsec/cmd/ember-custom@v0.1.0
 
 The binary lands in `$(go env GOBIN)` (or `$(go env GOPATH)/bin` if `GOBIN` is unset).
 
-> **Which tag to install?** `@v0.1.0` is the supported stock-pinned release that works with Ember `v1.3.0` out of the box. The `main` branch is rolling and assumes upstream Ember PRs that haven't landed yet (`go install ...@main` builds, but the new UX features are no-ops until a future Ember release ships them). See [`ROADMAP.md`](ROADMAP.md) for v0.1.0 → v0.2.0 migration. v0.3.0 removed the `w` (whitelist) hotkey — see "Whitelisting: use Engine-Allowlists" below.
+> **Which tag to install?** `@v0.1.0` is the supported stock-pinned release that works with Ember `v1.3.0` out of the box. The `main` branch is rolling and assumes upstream Ember PRs that haven't landed yet (`go install ...@main` builds, but the new UX features are no-ops until a future Ember release ships them). See [`ROADMAP.md`](ROADMAP.md) for v0.1.0 → v0.2.0 migration. v0.2.0 removed the `w` (whitelist) hotkey — see "Whitelisting: use Engine-Allowlists" below.
 
 ### 3. Run with environment configuration
 
@@ -140,7 +140,7 @@ The CrowdSec tab is interactive:
 
 The confirm dialog shows the IP, origin and scenario inline so accidental hits are unlikely. While in confirm-mode the plugin **consumes every keystroke** so that other tabs/global shortcuts don't fire mid-flow.
 
-> **No more `w` (whitelist)?** Correct — removed in v0.3.0 (Forgejo [#13](https://forgejo.routetohome.renewulff.de/formin/ember-crowdsec/issues/13)). The hotkey produced a `type=whitelist` decision via `POST /v1/alerts`, which the Caddy bouncer reads as a block (the existence of any decision is a block marker; see "Whitelisting: use Engine-Allowlists" below). Use Engine-side postoverflow allowlists instead.
+> **No more `w` (whitelist)?** Correct — removed in v0.2.0 (Forgejo [#13](https://forgejo.routetohome.renewulff.de/formin/ember-crowdsec/issues/13)). The hotkey produced a `type=whitelist` decision via `POST /v1/alerts`, which the Caddy bouncer reads as a block (the existence of any decision is a block marker; see "Whitelisting: use Engine-Allowlists" below). Use Engine-side postoverflow allowlists instead.
 
 ### Origin filter (default = your decisions only)
 
@@ -196,7 +196,7 @@ That is a defensible design choice for a block-list bouncer, not a bug. The TUI'
 
 **Do this instead.** Allow-functionality in CrowdSec belongs in the Engine via centralized allowlists: <https://docs.crowdsec.net/docs/local_api/centralized_allowlists/>. The on-disk path is `/etc/crowdsec/postoverflows/s01-whitelist/<name>.yaml`; reload with `systemctl reload crowdsec` after edits.
 
-The `w` hotkey was removed in v0.3.0 (see [#13](https://forgejo.routetohome.renewulff.de/formin/ember-crowdsec/issues/13)). For allow-functionality, edit `/etc/crowdsec/postoverflows/s01-whitelist/<name>.yaml` and `systemctl reload crowdsec`.
+The `w` hotkey was removed in v0.2.0 (see [#13](https://forgejo.routetohome.renewulff.de/formin/ember-crowdsec/issues/13)). For allow-functionality, edit `/etc/crowdsec/postoverflows/s01-whitelist/<name>.yaml` and `systemctl reload crowdsec`.
 
 ## Multi-instance support
 
